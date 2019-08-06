@@ -18,6 +18,7 @@ package components
 
 import (
 	"fmt"
+
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/loader"
@@ -47,7 +48,8 @@ func (b *NetworkingOptionsBuilder) BuildOptions(o interface{}) error {
 	if networking == nil {
 		return fmt.Errorf("networking not set")
 	}
-	if networking.CNI != nil || networking.Weave != nil || networking.Flannel != nil || networking.Calico != nil || networking.Canal != nil || networking.Kuberouter != nil {
+
+	if networking.CNI != nil || networking.Weave != nil || networking.Flannel != nil || networking.Calico != nil || networking.Canal != nil || networking.Kuberouter != nil || networking.Romana != nil || networking.AmazonVPC != nil || networking.Cilium != nil || networking.LyftVPC != nil {
 		options.Kubelet.NetworkPluginName = "cni"
 
 		if k8sVersion.Major == 1 && k8sVersion.Minor <= 4 {
@@ -56,6 +58,11 @@ func (b *NetworkingOptionsBuilder) BuildOptions(o interface{}) error {
 			// ConfigureCBR0 flag removed from 1.5
 			options.Kubelet.ConfigureCBR0 = nil
 		}
+	}
+
+	if networking.GCE != nil {
+		// GCE IPAlias networking uses kubenet on the nodes
+		options.Kubelet.NetworkPluginName = "kubenet"
 	}
 
 	if networking.Classic != nil {
@@ -67,6 +74,19 @@ func (b *NetworkingOptionsBuilder) BuildOptions(o interface{}) error {
 		} else {
 			return fmt.Errorf("classic networking not supported after 1.4")
 		}
+	}
+
+	if networking.Romana != nil {
+		daemonIP, err := WellKnownServiceIP(clusterSpec, 99)
+		if err != nil {
+			return err
+		}
+		networking.Romana.DaemonServiceIP = daemonIP.String()
+		etcdIP, err := WellKnownServiceIP(clusterSpec, 88)
+		if err != nil {
+			return err
+		}
+		networking.Romana.EtcdServiceIP = etcdIP.String()
 	}
 
 	return nil

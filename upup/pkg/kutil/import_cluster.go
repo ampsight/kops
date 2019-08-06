@@ -27,12 +27,12 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ec2"
-	"github.com/golang/glog"
+	"k8s.io/klog"
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/apis/kops/registry"
 	"k8s.io/kops/pkg/client/simple"
 	"k8s.io/kops/pkg/pki"
-	"k8s.io/kops/pkg/resources"
+	awsresources "k8s.io/kops/pkg/resources/aws"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
@@ -120,7 +120,7 @@ func (x *ImportCluster) ImportAWSCluster() error {
 			if masterInstance != nil {
 				masterState := aws.StringValue(masterInstance.State.Name)
 
-				glog.Infof("Found multiple masters: %s and %s", masterState, instanceState)
+				klog.Infof("Found multiple masters: %s and %s", masterState, instanceState)
 
 				if masterState == "terminated" && instanceState != "terminated" {
 					// OK
@@ -138,7 +138,7 @@ func (x *ImportCluster) ImportAWSCluster() error {
 		return fmt.Errorf("could not find master node")
 	}
 	masterInstanceID := aws.StringValue(masterInstance.InstanceId)
-	glog.Infof("Found master: %q", masterInstanceID)
+	klog.Infof("Found master: %q", masterInstanceID)
 
 	masterGroup := &kops.InstanceGroup{}
 	masterGroup.Spec.Role = kops.InstanceGroupRoleMaster
@@ -150,7 +150,7 @@ func (x *ImportCluster) ImportAWSCluster() error {
 	masterInstanceGroups := []*kops.InstanceGroup{masterGroup}
 	instanceGroups = append(instanceGroups, masterGroup)
 
-	awsSubnets, err := resources.DescribeSubnets(x.Cloud)
+	awsSubnets, err := awsresources.DescribeSubnets(x.Cloud)
 	if err != nil {
 		return fmt.Errorf("error finding subnets: %v", err)
 	}
@@ -167,7 +167,7 @@ func (x *ImportCluster) ImportAWSCluster() error {
 		}
 
 		if !found {
-			glog.Warningf("Ignoring subnet %q in which no instances were found", subnetID)
+			klog.Warningf("Ignoring subnet %q in which no instances were found", subnetID)
 		}
 	}
 
@@ -291,16 +291,16 @@ func (x *ImportCluster) ImportAWSCluster() error {
 	//}
 
 	{
-		groups, err := resources.FindAutoscalingGroups(awsCloud, awsCloud.Tags())
+		groups, err := awsup.FindAutoscalingGroups(awsCloud, awsCloud.Tags())
 		if err != nil {
 			return fmt.Errorf("error listing autoscaling groups: %v", err)
 		}
 
 		if len(groups) == 0 {
-			glog.Warningf("No Autoscaling group found")
+			klog.Warningf("No Autoscaling group found")
 		}
 		if len(groups) == 1 {
-			glog.Warningf("Multiple Autoscaling groups found")
+			klog.Warningf("Multiple Autoscaling groups found")
 		}
 		minSize := int32(0)
 		maxSize := int32(0)
@@ -318,13 +318,13 @@ func (x *ImportCluster) ImportAWSCluster() error {
 		// Determine the machine type
 		for _, group := range groups {
 			name := aws.StringValue(group.LaunchConfigurationName)
-			launchConfiguration, err := resources.FindAutoscalingLaunchConfiguration(awsCloud, name)
+			launchConfiguration, err := awsresources.FindAutoscalingLaunchConfiguration(awsCloud, name)
 			if err != nil {
 				return fmt.Errorf("error finding autoscaling LaunchConfiguration %q: %v", name, err)
 			}
 
 			if launchConfiguration == nil {
-				glog.Warningf("LaunchConfiguration %q not found; ignoring", name)
+				klog.Warningf("ignoring error launchConfiguration %q not found", name)
 				continue
 			}
 
@@ -414,7 +414,7 @@ func (x *ImportCluster) ImportAWSCluster() error {
 
 	//b.Context = "aws_" + instancePrefix
 
-	keyStore, err := registry.KeyStore(cluster)
+	keyStore, err := x.Clientset.KeyStore(cluster)
 	if err != nil {
 		return err
 	}
@@ -542,7 +542,7 @@ func parseInt(s string) (int, error) {
 //		if ok && s == "" {
 //			delete(m, k)
 //		}
-//		//glog.Infof("%v=%v", k, v)
+//		//klog.Infof("%v=%v", k, v)
 //	}
 //
 //	yaml, err := yaml.Marshal(confObj)
@@ -623,13 +623,13 @@ func parseInt(s string) (int, error) {
 //}
 
 func findInstances(c awsup.AWSCloud) ([]*ec2.Instance, error) {
-	filters := resources.BuildEC2Filters(c)
+	filters := awsresources.BuildEC2Filters(c)
 
 	request := &ec2.DescribeInstancesInput{
 		Filters: filters,
 	}
 
-	glog.V(2).Infof("Querying EC2 instances")
+	klog.V(2).Infof("Querying EC2 instances")
 
 	var instances []*ec2.Instance
 
@@ -725,7 +725,7 @@ func (u *UserDataConfiguration) ParseCert(key string) (*pki.Certificate, error) 
 	if err != nil {
 		return nil, fmt.Errorf("error decoding base64 certificate %q: %v", key, err)
 	}
-	cert, err := pki.LoadPEMCertificate(data)
+	cert, err := pki.ParsePEMCertificate(data)
 	if err != nil {
 		return nil, fmt.Errorf("error parsing certificate %q: %v", key, err)
 	}
@@ -779,7 +779,7 @@ func ParseUserDataConfiguration(raw []byte) (*UserDataConfiguration, error) {
 			}
 
 			if k == "" {
-				glog.V(4).Infof("Unknown line: %s", line)
+				klog.V(4).Infof("Unknown line: %s", line)
 			}
 
 			if len(v) >= 2 && v[0] == '\'' && v[len(v)-1] == '\'' {
@@ -798,7 +798,7 @@ func ParseUserDataConfiguration(raw []byte) (*UserDataConfiguration, error) {
 			}
 
 			if k == "" {
-				glog.V(4).Infof("Unknown line: %s", line)
+				klog.V(4).Infof("Unknown line: %s", line)
 			}
 
 			if len(v) >= 2 && v[0] == '"' && v[len(v)-1] == '"' {
@@ -821,7 +821,7 @@ func UserDataToString(userData []byte) (string, error) {
 	var err error
 	if len(userData) > 2 && userData[0] == 31 && userData[1] == 139 {
 		// GZIP
-		glog.V(2).Infof("gzip data detected; will decompress")
+		klog.V(2).Infof("gzip data detected; will decompress")
 
 		userData, err = gunzipBytes(userData)
 		if err != nil {

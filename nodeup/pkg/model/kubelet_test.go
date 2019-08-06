@@ -17,19 +17,12 @@ limitations under the License.
 package model
 
 import (
-	"bytes"
-	"io/ioutil"
-	"path"
-	"sort"
-	"strings"
+	"fmt"
 	"testing"
 
-	"fmt"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/kops/nodeup/pkg/distros"
 	"k8s.io/kops/pkg/apis/kops"
-	"k8s.io/kops/pkg/apis/kops/v1alpha2"
-	"k8s.io/kops/pkg/diff"
+	"k8s.io/kops/pkg/testutils"
 	"k8s.io/kops/upup/pkg/fi"
 )
 
@@ -50,6 +43,10 @@ func Test_InstanceGroupKubeletMerge(t *testing.T) {
 			InstanceGroup: instanceGroup,
 		},
 	}
+	if err := b.Init(); err != nil {
+		t.Error(err)
+	}
+
 	var mergedKubeletSpec, err = b.buildKubeletConfigSpec()
 	if err != nil {
 		t.Error(err)
@@ -108,6 +105,10 @@ func TestTaintsAppliedAfter160(t *testing.T) {
 				InstanceGroup: ig,
 			},
 		}
+		if err := b.Init(); err != nil {
+			t.Error(err)
+		}
+
 		c, err := b.buildKubeletConfigSpec()
 
 		if g.expectError {
@@ -123,7 +124,7 @@ func TestTaintsAppliedAfter160(t *testing.T) {
 		}
 
 		if fi.BoolValue(c.RegisterSchedulable) != g.expectSchedulable {
-			t.Fatalf("Expected RegisterSchedulable == %v, got %v", g.expectSchedulable, fi.BoolValue(c.RegisterSchedulable))
+			t.Fatalf("Expected RegisterSchedulable == %v, got %v (for %v)", g.expectSchedulable, fi.BoolValue(c.RegisterSchedulable), g.version)
 		}
 
 		if !stringSlicesEqual(g.expectTaints, c.Taints) {
@@ -160,7 +161,7 @@ func Test_RunKubeletBuilder(t *testing.T) {
 	context := &fi.ModelBuilderContext{
 		Tasks: make(map[string]fi.Task),
 	}
-	nodeUpModelContext, err := LoadModel(basedir)
+	nodeUpModelContext, err := BuildNodeupModelContext(basedir)
 	if err != nil {
 		t.Fatalf("error loading model %q: %v", basedir, err)
 		return
@@ -181,87 +182,54 @@ func Test_RunKubeletBuilder(t *testing.T) {
 	}
 	context.AddTask(fileTask)
 
-	ValidateTasks(t, basedir, context)
-}
-
-func LoadModel(basedir string) (*NodeupModelContext, error) {
-	clusterYamlPath := path.Join(basedir, "cluster.yaml")
-	clusterYaml, err := ioutil.ReadFile(clusterYamlPath)
-	if err != nil {
-		return nil, fmt.Errorf("error reading cluster yaml file %q: %v", clusterYamlPath, err)
+	{
+		task, err := builder.buildManifestDirectory(kubeletConfig)
+		if err != nil {
+			t.Fatalf("error from KubeletBuilder buildManifestDirectory: %v", err)
+			return
+		}
+		context.AddTask(task)
 	}
 
-	var cluster *kops.Cluster
-	var instanceGroup *kops.InstanceGroup
-
-	// Codecs provides access to encoding and decoding for the scheme
-	codecs := kops.Codecs
-
-	codec := codecs.UniversalDecoder(kops.SchemeGroupVersion)
-
-	sections := bytes.Split(clusterYaml, []byte("\n---\n"))
-	for _, section := range sections {
-		defaults := &schema.GroupVersionKind{
-			Group:   v1alpha2.SchemeGroupVersion.Group,
-			Version: v1alpha2.SchemeGroupVersion.Version,
-		}
-		o, gvk, err := codec.Decode(section, defaults, nil)
+	{
+		task := builder.buildSystemdService()
 		if err != nil {
-			return nil, fmt.Errorf("error parsing file %v", err)
+			t.Fatalf("error from KubeletBuilder buildSystemdService: %v", err)
+			return
 		}
+		context.AddTask(task)
+	}
 
-		switch v := o.(type) {
-		case *kops.Cluster:
-			cluster = v
-		case *kops.InstanceGroup:
-			instanceGroup = v
-		default:
-			return nil, fmt.Errorf("Unhandled kind %q", gvk)
-		}
+	testutils.ValidateTasks(t, basedir, context)
+}
+
+func BuildNodeupModelContext(basedir string) (*NodeupModelContext, error) {
+	model, err := testutils.LoadModel(basedir)
+	if err != nil {
+		return nil, err
+	}
+
+	if model.Cluster == nil {
+		return nil, fmt.Errorf("no cluster found in %s", basedir)
 	}
 
 	nodeUpModelContext := &NodeupModelContext{
-		Cluster:       cluster,
-		Architecture:  "amd64",
-		Distribution:  distros.DistributionXenial,
-		InstanceGroup: instanceGroup,
+		Cluster:      model.Cluster,
+		Architecture: "amd64",
+		Distribution: distros.DistributionXenial,
+	}
+
+	if len(model.InstanceGroups) == 0 {
+		// We tolerate this - not all tests need an instance group
+	} else if len(model.InstanceGroups) == 1 {
+		nodeUpModelContext.InstanceGroup = model.InstanceGroups[0]
+	} else {
+		return nil, fmt.Errorf("unexpected number of instance groups in %s, found %d", basedir, len(model.InstanceGroups))
+	}
+
+	if err := nodeUpModelContext.Init(); err != nil {
+		return nil, err
 	}
 
 	return nodeUpModelContext, nil
-}
-
-func ValidateTasks(t *testing.T, basedir string, context *fi.ModelBuilderContext) {
-	var keys []string
-	for key := range context.Tasks {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-
-	var yamls []string
-	for _, key := range keys {
-		task := context.Tasks[key]
-		yaml, err := kops.ToRawYaml(task)
-		if err != nil {
-			t.Fatalf("error serializing task: %v", err)
-		}
-		yamls = append(yamls, strings.TrimSpace(string(yaml)))
-	}
-
-	actualTasksYaml := strings.Join(yamls, "\n---\n")
-
-	tasksYamlPath := path.Join(basedir, "tasks.yaml")
-	expectedTasksYamlBytes, err := ioutil.ReadFile(tasksYamlPath)
-	if err != nil {
-		t.Fatalf("error reading file %q: %v", tasksYamlPath, err)
-	}
-
-	actualTasksYaml = strings.TrimSpace(actualTasksYaml)
-	expectedTasksYaml := strings.TrimSpace(string(expectedTasksYamlBytes))
-
-	if expectedTasksYaml != actualTasksYaml {
-		diffString := diff.FormatDiff(expectedTasksYaml, actualTasksYaml)
-		t.Logf("diff:\n%s\n", diffString)
-
-		t.Fatalf("tasks differed from expected for test %q", basedir)
-	}
 }

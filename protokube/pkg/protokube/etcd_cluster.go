@@ -26,19 +26,10 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/resource"
-
-	"github.com/golang/glog"
+	"k8s.io/klog"
+	"k8s.io/kops/pkg/k8scodecs"
+	"k8s.io/kops/protokube/pkg/etcd"
 )
-
-// EtcdClusterSpec is configuration for the etcd cluster
-type EtcdClusterSpec struct {
-	// ClusterKey is the initial cluster key
-	ClusterKey string `json:"clusterKey,omitempty"`
-	// NodeName is my nodename in the cluster
-	NodeName string `json:"nodeName,omitempty"`
-	// NodeNames is a collection of node members in the cluster
-	NodeNames []string `json:"nodeNames,omitempty"`
-}
 
 // EtcdCluster is the configuration for the etcd cluster
 type EtcdCluster struct {
@@ -48,17 +39,19 @@ type EtcdCluster struct {
 	ClusterName string
 	// ClusterToken is the cluster token
 	ClusterToken string
-	// CPURequest is the pod limits
-	CPURequest resource.Quantity
+	// CPURequest is the pod request for CPU
+	CPURequest *resource.Quantity
+	// MemoryRequest is the pod request for Memory
+	MemoryRequest *resource.Quantity
 	// DataDirName is the path to the data directory
 	DataDirName string
 	// ImageSource is the docker image to use
 	ImageSource string
 	// LogFile is the location of the logfile
 	LogFile string
-	// Me represents myself
+	// Me is the node that we will be in the cluster
 	Me *EtcdNode
-	// Nodes is a list of nodes in the cluster
+	// Nodes is a list of nodes in the cluster (including the self-node, Me)
 	Nodes []*EtcdNode
 	// PeerPort is the port for peers to connect
 	PeerPort int
@@ -67,9 +60,11 @@ type EtcdCluster struct {
 	// ProxyMode indicates we are running in proxy mode
 	ProxyMode bool
 	// Spec is the specification found from the volumes
-	Spec *EtcdClusterSpec
+	Spec *etcd.EtcdClusterSpec
 	// VolumeMountPath is the mount path
 	VolumeMountPath string
+	// TLSAuth indicates we should enforce peer and client verification
+	TLSAuth bool
 	// TLSCA is the path to a client ca for etcd clients
 	TLSCA string
 	// TLSCert is the path to a client certificate for etcd
@@ -82,6 +77,14 @@ type EtcdCluster struct {
 	PeerCert string
 	// PeerKey is the path to a peer ca for etcd
 	PeerKey string
+	// ElectionTimeout is the leader election timeout
+	ElectionTimeout string
+	// HeartbeatInterval is the heartbeat interval
+	HeartbeatInterval string
+	// BackupImage is the image to use for backing up etcd
+	BackupImage string
+	// BackupStore is a VFS path for backing up etcd
+	BackupStore string
 }
 
 // EtcdNode is a definition for the etcd node
@@ -94,33 +97,41 @@ type EtcdNode struct {
 type EtcdController struct {
 	kubeBoot   *KubeBoot
 	volume     *Volume
-	volumeSpec *EtcdClusterSpec
+	volumeSpec *etcd.EtcdClusterSpec
 	cluster    *EtcdCluster
 }
 
 // newEtcdController creates and returns a new etcd controller
-func newEtcdController(kubeBoot *KubeBoot, v *Volume, spec *EtcdClusterSpec) (*EtcdController, error) {
+func newEtcdController(kubeBoot *KubeBoot, v *Volume, spec *etcd.EtcdClusterSpec) (*EtcdController, error) {
 	k := &EtcdController{
 		kubeBoot: kubeBoot,
 	}
 
+	// prepare parse variables for cpu and memory requests
+	cpuRequest100 := resource.MustParse("100m")
+	cpuRequest200 := resource.MustParse("200m")
+	memoryRequest := resource.MustParse("100Mi")
+
 	cluster := &EtcdCluster{
-		// @TODO we need to deprecate this port and use 2379, but that would be a breaking change
-		ClientPort:      4001,
-		ClusterName:     "etcd-" + spec.ClusterKey,
-		CPURequest:      resource.MustParse("200m"),
-		DataDirName:     "data-" + spec.ClusterKey,
-		ImageSource:     kubeBoot.EtcdImageSource,
-		TLSCA:           kubeBoot.TLSCA,
-		TLSCert:         kubeBoot.TLSCert,
-		TLSKey:          kubeBoot.TLSKey,
-		PeerCA:          kubeBoot.PeerCA,
-		PeerCert:        kubeBoot.PeerCert,
-		PeerKey:         kubeBoot.PeerKey,
-		PeerPort:        2380,
-		PodName:         "etcd-server-" + spec.ClusterKey,
-		Spec:            spec,
-		VolumeMountPath: v.Mountpoint,
+		CPURequest:        &cpuRequest100,
+		MemoryRequest:     &memoryRequest,
+		ClientPort:        4001,
+		ClusterName:       "etcd-" + spec.ClusterKey,
+		DataDirName:       "data-" + spec.ClusterKey,
+		ElectionTimeout:   kubeBoot.EtcdElectionTimeout,
+		HeartbeatInterval: kubeBoot.EtcdHeartbeatInterval,
+		ImageSource:       kubeBoot.EtcdImageSource,
+		PeerCA:            kubeBoot.PeerCA,
+		PeerCert:          kubeBoot.PeerCert,
+		PeerKey:           kubeBoot.PeerKey,
+		PeerPort:          2380,
+		PodName:           "etcd-server-" + spec.ClusterKey,
+		Spec:              spec,
+		TLSAuth:           kubeBoot.TLSAuth,
+		TLSCA:             kubeBoot.TLSCA,
+		TLSCert:           kubeBoot.TLSCert,
+		TLSKey:            kubeBoot.TLSKey,
+		VolumeMountPath:   v.Mountpoint,
 	}
 
 	// We used to build this through text files ... it turns out to just be more complicated than code!
@@ -129,7 +140,12 @@ func newEtcdController(kubeBoot *KubeBoot, v *Volume, spec *EtcdClusterSpec) (*E
 		cluster.ClusterName = "etcd"
 		cluster.DataDirName = "data"
 		cluster.PodName = "etcd-server"
-		cluster.CPURequest = resource.MustParse("200m")
+		cluster.CPURequest = &cpuRequest200
+
+		// Because we can only specify a single EtcdBackupStore at the moment, we only backup main, not events
+		cluster.BackupImage = kubeBoot.EtcdBackupImage
+		cluster.BackupStore = kubeBoot.EtcdBackupStore
+
 	case "events":
 		cluster.ClientPort = 4002
 		cluster.PeerPort = 2381
@@ -146,7 +162,7 @@ func newEtcdController(kubeBoot *KubeBoot, v *Volume, spec *EtcdClusterSpec) (*E
 func (k *EtcdController) RunSyncLoop() {
 	for {
 		if err := k.syncOnce(); err != nil {
-			glog.Warningf("error during attempt to bootstrap (will sleep and retry): %v", err)
+			klog.Warningf("error during attempt to bootstrap (will sleep and retry): %v", err)
 		}
 
 		time.Sleep(1 * time.Minute)
@@ -180,6 +196,32 @@ func (c *EtcdCluster) configure(k *KubeBoot) error {
 		c.ClusterToken = "etcd-cluster-token-" + name
 	}
 
+	// By default we use 100Mi for etcd memory
+	if c.MemoryRequest == nil || c.MemoryRequest.IsZero() {
+		memoryRequest, err := resource.ParseQuantity("100Mi")
+		if err != nil {
+			return fmt.Errorf("error parsing memory request for etcd (%s): %v", "100Mi", err)
+		}
+		c.MemoryRequest = &memoryRequest
+	}
+
+	// By default we use 100m for etcd cpu, unless the name is 'main', then we use 200m by default
+	if c.CPURequest == nil || c.CPURequest.IsZero() {
+		if c.ClusterName == "main" {
+			cpuRequest, err := resource.ParseQuantity("200m")
+			if err != nil {
+				return fmt.Errorf("error parsing cpu request for etcd (%s): %v", "200m", err)
+			}
+			c.CPURequest = &cpuRequest
+		} else {
+			cpuRequest, err := resource.ParseQuantity("100m")
+			if err != nil {
+				return fmt.Errorf("error parsing cpu request for etcd (%s): %v", "100m", err)
+			}
+			c.CPURequest = &cpuRequest
+		}
+	}
+
 	var nodes []*EtcdNode
 	for _, nodeName := range c.Spec.NodeNames {
 		name := name + "-" + nodeName
@@ -204,9 +246,9 @@ func (c *EtcdCluster) configure(k *KubeBoot) error {
 	}
 
 	pod := BuildEtcdManifest(c)
-	manifest, err := ToVersionedYaml(pod)
+	manifest, err := k8scodecs.ToVersionedYaml(pod)
 	if err != nil {
-		return fmt.Errorf("error marshalling pod to yaml: %v", err)
+		return fmt.Errorf("error marshaling pod to yaml: %v", err)
 	}
 
 	// Time to write the manifest!
@@ -230,7 +272,7 @@ func (c *EtcdCluster) configure(k *KubeBoot) error {
 		} else if bytes.Equal(existingManifest, manifest) {
 			writeManifest = false
 		} else {
-			glog.Infof("Need to update manifest file: %q", manifestTarget)
+			klog.Infof("Need to update manifest file: %q", manifestTarget)
 		}
 	}
 
@@ -252,10 +294,10 @@ func (c *EtcdCluster) configure(k *KubeBoot) error {
 			if target == manifestTarget {
 				createSymlink = false
 			} else {
-				glog.Infof("Need to update manifest symlink (wrong target %q): %q", target, manifestSource)
+				klog.Infof("Need to update manifest symlink (wrong target %q): %q", target, manifestSource)
 			}
 		} else {
-			glog.Infof("Need to update manifest symlink (not a symlink): %q", manifestSource)
+			klog.Infof("Need to update manifest symlink (not a symlink): %q", manifestSource)
 		}
 	}
 
@@ -281,14 +323,10 @@ func (c *EtcdCluster) configure(k *KubeBoot) error {
 			return fmt.Errorf("error creating etcd manifest symlink %q -> %q: %v", manifestSource, manifestTarget, err)
 		}
 
-		glog.Infof("Updated etcd manifest: %s", manifestSource)
+		klog.Infof("Updated etcd manifest: %s", manifestSource)
 	}
 
 	return nil
-}
-
-func (e *EtcdClusterSpec) String() string {
-	return DebugString(e)
 }
 
 // isTLS indicates the etcd cluster should be configured to use tls

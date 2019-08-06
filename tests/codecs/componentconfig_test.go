@@ -17,24 +17,24 @@ limitations under the License.
 package codecs
 
 import (
-	"k8s.io/kops/pkg/apis/kops"
-	_ "k8s.io/kops/pkg/apis/kops/install"
+	"testing"
+
 	"k8s.io/kops/pkg/apis/kops/v1alpha2"
 	"k8s.io/kops/pkg/diff"
-	"testing"
+	"k8s.io/kops/pkg/kopscodecs"
 )
 
 func TestSerializeEmptyCluster(t *testing.T) {
 	cluster := &v1alpha2.Cluster{}
 	cluster.Spec.Kubelet = &v1alpha2.KubeletConfigSpec{}
 	cluster.Spec.KubeControllerManager = &v1alpha2.KubeControllerManagerConfig{}
-	yaml, err := kops.ToVersionedYamlWithVersion(cluster, "v1alpha2")
+	yaml, err := kopscodecs.ToVersionedYamlWithVersion(cluster, v1alpha2.SchemeGroupVersion)
 	if err != nil {
-		t.Errorf("unexpected error marshalling Cluster: %v", err)
+		t.Errorf("unexpected error marshaling Cluster: %v", err)
 	}
 
 	yamlString := string(yaml)
-	expected := `apiVersion: kops/v1alpha2
+	expected := `apiVersion: kops.k8s.io/v1alpha2
 kind: Cluster
 metadata:
   creationTimestamp: null

@@ -18,12 +18,13 @@ package fi
 
 import (
 	"fmt"
-	"github.com/golang/glog"
 	"io"
-	"k8s.io/kops/util/pkg/hashing"
 	"net/http"
 	"os"
 	"path"
+
+	"k8s.io/klog"
+	"k8s.io/kops/util/pkg/hashing"
 )
 
 func DownloadURL(url string, dest string, hash *hashing.Hash) (*hashing.Hash, error) {
@@ -73,7 +74,7 @@ func downloadURLAlways(url string, destPath string, dirMode os.FileMode) error {
 	}
 	defer output.Close()
 
-	glog.Infof("Downloading %q", url)
+	klog.Infof("Downloading %q", url)
 
 	response, err := http.Get(url)
 	if err != nil {

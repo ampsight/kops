@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors.
+Copyright 2018 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,10 +26,10 @@ import (
 
 // Route
 
-// JSON marshalling boilerplate
+// JSON marshaling boilerplate
 type realRoute Route
 
-// UnmarshalJSON implements conversion to JSON, supporitng an alternate specification of the object as a string
+// UnmarshalJSON implements conversion to JSON, supporting an alternate specification of the object as a string
 func (o *Route) UnmarshalJSON(data []byte) error {
 	var jsonName string
 	if err := json.Unmarshal(data, &jsonName); err == nil {
@@ -50,6 +50,11 @@ var _ fi.HasLifecycle = &Route{}
 // GetLifecycle returns the Lifecycle of the object, implementing fi.HasLifecycle
 func (o *Route) GetLifecycle() *fi.Lifecycle {
 	return o.Lifecycle
+}
+
+// SetLifecycle sets the Lifecycle of the object, implementing fi.SetLifecycle
+func (o *Route) SetLifecycle(lifecycle fi.Lifecycle) {
+	o.Lifecycle = &lifecycle
 }
 
 var _ fi.HasName = &Route{}

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Copyright 2016 The Kubernetes Authors.
 #
@@ -16,12 +16,12 @@
 
 . $(dirname "${BASH_SOURCE}")/common.sh
 
-GOFMT="gofmt -s -w"
+GOFMT="bazel run //:gofmt -- -s -w"
 
-bad_files=$(git ls-files "*.go" | grep -v vendor | xargs -I {} $GOFMT -l {})
+bad_files=$(git ls-files "*.go" | grep -v vendor | xargs $GOFMT -l)
 if [[ -n "${bad_files}" ]]; then
-  echo "!!! '$GOFMT' needs to be run on the following files: "
+  echo "FAIL: '$GOFMT' needs to be run on the following files: "
   echo "${bad_files}"
-  echo "!!! Please run: make gofmt"
+  echo "FAIL: please execute make gofmt"
   exit 1
 fi

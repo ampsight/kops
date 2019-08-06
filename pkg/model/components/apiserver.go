@@ -20,13 +20,12 @@ import (
 	"fmt"
 	"strings"
 
-	"k8s.io/client-go/pkg/api/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/loader"
 
 	"github.com/blang/semver"
-	"github.com/golang/glog"
 )
 
 // KubeAPIServerOptionsBuilder adds options for the apiserver to the model
@@ -36,7 +35,7 @@ type KubeAPIServerOptionsBuilder struct {
 
 var _ loader.OptionsBuilder = &KubeAPIServerOptionsBuilder{}
 
-// BuildOptions is resposible for filling in the default settings for the kube apiserver
+// BuildOptions is responsible for filling in the default settings for the kube apiserver
 func (b *KubeAPIServerOptionsBuilder) BuildOptions(o interface{}) error {
 	clusterSpec := o.(*kops.ClusterSpec)
 	if clusterSpec.KubeAPIServer == nil {
@@ -55,7 +54,7 @@ func (b *KubeAPIServerOptionsBuilder) BuildOptions(o interface{}) error {
 	// @question: should the question every be able to set this?
 	if c.StorageBackend == nil {
 		// @note: we can use the first version as we enforce both running the same versions.
-		// albeit feels a little wierd to do this
+		// albeit feels a little weird to do this
 		sem, err := semver.Parse(strings.TrimPrefix(clusterSpec.EtcdClusters[0].Version, "v"))
 		if err != nil {
 			return err
@@ -91,7 +90,56 @@ func (b *KubeAPIServerOptionsBuilder) BuildOptions(o interface{}) error {
 	} else if clusterSpec.Authorization.AlwaysAllow != nil {
 		clusterSpec.KubeAPIServer.AuthorizationMode = fi.String("AlwaysAllow")
 	} else if clusterSpec.Authorization.RBAC != nil {
-		clusterSpec.KubeAPIServer.AuthorizationMode = fi.String("RBAC")
+		var modes []string
+
+		if b.IsKubernetesGTE("1.10") {
+			if fi.BoolValue(clusterSpec.KubeAPIServer.EnableBootstrapAuthToken) {
+				// Enable the Node authorizer, used for special per-node RBAC policies
+				modes = append(modes, "Node")
+			}
+		}
+		modes = append(modes, "RBAC")
+
+		clusterSpec.KubeAPIServer.AuthorizationMode = fi.String(strings.Join(modes, ","))
+	}
+
+	if clusterSpec.KubeAPIServer.EtcdQuorumRead == nil {
+		if b.IsKubernetesGTE("1.9") {
+			// 1.9 changed etcd-quorum-reads default to true
+			// There's a balance between some bugs which are attributed to not having etcd-quorum-reads,
+			// and the poor implementation of quorum-reads in etcd2.
+
+			etcdHA := false
+			etcdV2 := true
+			for _, c := range clusterSpec.EtcdClusters {
+				if len(c.Members) > 1 {
+					etcdHA = true
+				}
+				if c.Version != "" && !strings.HasPrefix(c.Version, "2.") {
+					etcdV2 = false
+				}
+			}
+
+			if !etcdV2 {
+				// etcd3 quorum reads are cheap.  Stick with default (which is to enable quorum reads)
+				clusterSpec.KubeAPIServer.EtcdQuorumRead = nil
+			} else {
+				// etcd2 quorum reads go through raft => write to disk => expensive
+				if !etcdHA {
+					// Turn off quorum reads - they still go through raft, but don't serve any purpose in non-HA clusters.
+					clusterSpec.KubeAPIServer.EtcdQuorumRead = fi.Bool(false)
+				} else {
+					// The problematic case.  We risk exposing more bugs, but against that we have to balance performance.
+					// For now we turn off quorum reads - it's a bad enough performance regression
+					// We'll likely make this default to true once we can set IOPS on the etcd volume and can easily upgrade to etcd3
+					clusterSpec.KubeAPIServer.EtcdQuorumRead = fi.Bool(false)
+				}
+			}
+		}
+	}
+
+	if err := b.configureAggregation(clusterSpec); err != nil {
+		return nil
 	}
 
 	image, err := Image("kube-apiserver", clusterSpec, b.AssetBuilder)
@@ -109,13 +157,30 @@ func (b *KubeAPIServerOptionsBuilder) BuildOptions(o interface{}) error {
 		c.CloudProvider = "external"
 	case kops.CloudProviderVSphere:
 		c.CloudProvider = "vsphere"
+	case kops.CloudProviderBareMetal:
+		// for baremetal, we don't specify a cloudprovider to apiserver
+	case kops.CloudProviderOpenstack:
+		c.CloudProvider = "openstack"
+	case kops.CloudProviderALI:
+		c.CloudProvider = "alicloud"
 	default:
-		return fmt.Errorf("unknown cloud provider %q", clusterSpec.CloudProvider)
+		return fmt.Errorf("unknown cloudprovider %q", clusterSpec.CloudProvider)
+	}
+
+	if clusterSpec.ExternalCloudControllerManager != nil {
+		c.CloudProvider = "external"
 	}
 
 	c.LogLevel = 2
 	c.SecurePort = 443
-	c.Address = "127.0.0.1"
+
+	if b.IsKubernetesGTE("1.10") {
+		c.BindAddress = "0.0.0.0"
+		c.InsecureBindAddress = "127.0.0.1"
+	} else {
+		c.Address = "127.0.0.1"
+	}
+
 	c.AllowPrivileged = fi.Bool(true)
 	c.ServiceClusterIPRange = clusterSpec.ServiceClusterIPRange
 	c.EtcdServers = []string{"http://127.0.0.1:4001"}
@@ -162,7 +227,7 @@ func (b *KubeAPIServerOptionsBuilder) BuildOptions(o interface{}) error {
 			"ResourceQuota",
 		}
 	}
-	if b.IsKubernetesGTE("1.7") && b.IsKubernetesLT("1.8") {
+	if b.IsKubernetesGTE("1.7") && b.IsKubernetesLT("1.9") {
 		c.AdmissionControl = []string{
 			"Initializers",
 			"NamespaceLifecycle",
@@ -175,7 +240,7 @@ func (b *KubeAPIServerOptionsBuilder) BuildOptions(o interface{}) error {
 			"ResourceQuota",
 		}
 	}
-	if b.IsKubernetesGTE("1.8") {
+	if b.IsKubernetesGTE("1.9") && b.IsKubernetesLT("1.10") {
 		c.AdmissionControl = []string{
 			"Initializers",
 			"NamespaceLifecycle",
@@ -184,10 +249,46 @@ func (b *KubeAPIServerOptionsBuilder) BuildOptions(o interface{}) error {
 			"PersistentVolumeLabel",
 			"DefaultStorageClass",
 			"DefaultTolerationSeconds",
+			"MutatingAdmissionWebhook",
+			"ValidatingAdmissionWebhook",
 			"NodeRestriction",
-			"Priority",
 			"ResourceQuota",
 		}
+	}
+	// Based on recommendations from:
+	// https://kubernetes.io/docs/admin/admission-controllers/#is-there-a-recommended-set-of-admission-controllers-to-use
+	if b.IsKubernetesGTE("1.10") && b.IsKubernetesLT("1.12") {
+		c.EnableAdmissionPlugins = []string{
+			"Initializers",
+			"NamespaceLifecycle",
+			"LimitRanger",
+			"ServiceAccount",
+			"PersistentVolumeLabel",
+			"DefaultStorageClass",
+			"DefaultTolerationSeconds",
+			"MutatingAdmissionWebhook",
+			"ValidatingAdmissionWebhook",
+			"NodeRestriction",
+			"ResourceQuota",
+		}
+		c.EnableAdmissionPlugins = append(c.EnableAdmissionPlugins, c.AppendAdmissionPlugins...)
+	}
+	// Based on recommendations from:
+	// https://kubernetes.io/docs/admin/admission-controllers/#is-there-a-recommended-set-of-admission-controllers-to-use
+	if b.IsKubernetesGTE("1.12") {
+		c.EnableAdmissionPlugins = []string{
+			"NamespaceLifecycle",
+			"LimitRanger",
+			"ServiceAccount",
+			"PersistentVolumeLabel",
+			"DefaultStorageClass",
+			"DefaultTolerationSeconds",
+			"MutatingAdmissionWebhook",
+			"ValidatingAdmissionWebhook",
+			"NodeRestriction",
+			"ResourceQuota",
+		}
+		c.EnableAdmissionPlugins = append(c.EnableAdmissionPlugins, c.AppendAdmissionPlugins...)
 	}
 
 	// We make sure to disable AnonymousAuth from when it was introduced
@@ -195,19 +296,13 @@ func (b *KubeAPIServerOptionsBuilder) BuildOptions(o interface{}) error {
 		c.AnonymousAuth = fi.Bool(false)
 	}
 
-	// We disable the insecure port from 1.6 onwards
-	if b.IsKubernetesGTE("1.6") {
-		c.InsecurePort = 0
-		glog.V(4).Infof("Enabling apiserver insecure port, for healthchecks (issue #43784)")
-		c.InsecurePort = 8080
-	} else {
-		c.InsecurePort = 8080
-	}
+	// FIXME : Disable the insecure port when kubernetes issue #43784 is fixed
+	c.InsecurePort = 8080
 
 	return nil
 }
 
-// buildAPIServerCount calculates the count of the api servers, essentuially the number of node marked as Master role
+// buildAPIServerCount calculates the count of the api servers, essentially the number of node marked as Master role
 func (b *KubeAPIServerOptionsBuilder) buildAPIServerCount(clusterSpec *kops.ClusterSpec) int {
 	// The --apiserver-count flag is (generally agreed) to be something we need to get rid of in k8s
 
@@ -240,4 +335,16 @@ func (b *KubeAPIServerOptionsBuilder) buildAPIServerCount(clusterSpec *kops.Clus
 	count := counts["main"]
 
 	return count
+}
+
+// configureAggregation sets up the aggregation options
+func (b *KubeAPIServerOptionsBuilder) configureAggregation(clusterSpec *kops.ClusterSpec) error {
+	if b.IsKubernetesGTE("1.7") {
+		clusterSpec.KubeAPIServer.RequestheaderAllowedNames = []string{"aggregator"}
+		clusterSpec.KubeAPIServer.RequestheaderExtraHeaderPrefixes = []string{"X-Remote-Extra-"}
+		clusterSpec.KubeAPIServer.RequestheaderGroupHeaders = []string{"X-Remote-Group"}
+		clusterSpec.KubeAPIServer.RequestheaderUsernameHeaders = []string{"X-Remote-User"}
+	}
+
+	return nil
 }

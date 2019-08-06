@@ -27,6 +27,12 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - pods/eviction
+  verbs:
+  - create
+- apiGroups:
+  - ""
+  resources:
   - pods/status
   verbs:
   - update
@@ -43,6 +49,14 @@ rules:
   - ""
   resources:
   - nodes
+  verbs:
+  - watch
+  - list
+  - get
+  - update
+- apiGroups:
+  - ""
+  resources:
   - pods
   - services
   - replicationcontrollers
@@ -51,6 +65,7 @@ rules:
   verbs:
   - watch
   - list
+  - get
 - apiGroups:
   - extensions
   resources:
@@ -59,6 +74,7 @@ rules:
   verbs:
   - watch
   - list
+  - get
 - apiGroups:
   - policy
   resources:
@@ -66,6 +82,14 @@ rules:
   verbs:
   - watch
   - list
+- apiGroups:
+  - apps
+  resources:
+  - statefulsets
+  verbs:
+  - watch
+  - list
+  - get
 
 ---
 
@@ -155,11 +179,21 @@ spec:
       annotations:
          # For 1.6, we keep the old tolerations in case of a downgrade to 1.5
         scheduler.alpha.kubernetes.io/tolerations: '[{"key":"dedicated", "value":"master"}]'
+        prometheus.io/scrape: 'true'
+        prometheus.io/port: '8085'
     spec:
       serviceAccountName: cluster-autoscaler
       containers:
         - name: cluster-autoscaler
           image: {{IMAGE}}
+          livenessProbe:
+            httpGet:
+              path: /health-check
+              port: 8085
+          readinessProbe:
+            httpGet:
+              path: /health-check
+              port: 8085
           resources:
             limits:
               cpu: 100m
@@ -182,6 +216,7 @@ spec:
         - name: ssl-certs
           hostPath:
             path: {{SSL_CERT_PATH}}
+      dnsPolicy: "Default"
       nodeSelector:
         node-role.kubernetes.io/master: ""
       tolerations:

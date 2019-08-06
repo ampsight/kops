@@ -19,11 +19,12 @@ package terraform
 import (
 	"bytes"
 	"fmt"
-	"github.com/golang/glog"
+	"strings"
+
 	"github.com/hashicorp/hcl/hcl/ast"
 	hcl_printer "github.com/hashicorp/hcl/hcl/printer"
+	"k8s.io/klog"
 	"k8s.io/kops/pkg/featureflag"
-	"strings"
 )
 
 const safeChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
@@ -55,7 +56,7 @@ func (v *astSanitizer) visit(n interface{}) {
 	case *ast.ObjectType:
 		v.visit(t.List)
 	default:
-		glog.Warningf(" unknown type: %T\n", n)
+		klog.Warningf(" unknown type: %T\n", n)
 	}
 
 }
@@ -114,13 +115,17 @@ func hclPrint(node ast.Node) ([]byte, error) {
 	s = strings.Replace(s, "\\u003e", ">", -1)
 
 	if featureflag.SkipTerraformFormat.Enabled() {
-		glog.Infof("feature-flag SkipTerraformFormat was set; skipping terraform format")
+		klog.Infof("feature-flag SkipTerraformFormat was set; skipping terraform format")
 		return []byte(s), nil
 	}
 
 	// Apply Terraform style (alignment etc.)
 	formatted, err := hcl_printer.Format([]byte(s))
 	if err != nil {
+		klog.Errorf("Invalid HCL follows:")
+		for i, line := range strings.Split(s, "\n") {
+			klog.Errorf("%d\t%s", (i + 1), line)
+		}
 		return nil, fmt.Errorf("error formatting HCL: %v", err)
 	}
 

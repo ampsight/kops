@@ -1,4 +1,4 @@
-apiVersion: kops/v1alpha2
+apiVersion: kops.k8s.io/v1alpha2
 kind: Cluster
 metadata:
   creationTimestamp: 2017-01-01T00:00:00Z
@@ -8,20 +8,25 @@ spec:
     loadBalancer:
       type: Public
   authorization:
-    alwaysAllow: {}
+    rbac: {}
   channel: stable
   cloudProvider: aws
   configBase: memfs://tests/private.example.com
   etcdClusters:
-  - etcdMembers:
+  - cpuRequest: 200m
+    etcdMembers:
     - instanceGroup: master-us-test-1a
       name: a
+    memoryRequest: 100Mi
     name: main
-  - etcdMembers:
+  - cpuRequest: 100m
+    etcdMembers:
     - instanceGroup: master-us-test-1a
       name: a
+    memoryRequest: 100Mi
     name: events
   iam:
+    allowContainerRegistry: true
     legacy: false
   kubernetesApiAccess:
   - 0.0.0.0/0
@@ -53,7 +58,7 @@ spec:
 
 ---
 
-apiVersion: kops/v1alpha2
+apiVersion: kops.k8s.io/v1alpha2
 kind: InstanceGroup
 metadata:
   creationTimestamp: 2017-01-01T00:00:00Z
@@ -65,13 +70,15 @@ spec:
   machineType: t2.micro
   maxSize: 1
   minSize: 1
+  nodeLabels:
+    kops.k8s.io/instancegroup: bastions
   role: Bastion
   subnets:
   - utility-us-test-1a
 
 ---
 
-apiVersion: kops/v1alpha2
+apiVersion: kops.k8s.io/v1alpha2
 kind: InstanceGroup
 metadata:
   creationTimestamp: 2017-01-01T00:00:00Z
@@ -83,13 +90,15 @@ spec:
   machineType: m3.medium
   maxSize: 1
   minSize: 1
+  nodeLabels:
+    kops.k8s.io/instancegroup: master-us-test-1a
   role: Master
   subnets:
   - us-test-1a
 
 ---
 
-apiVersion: kops/v1alpha2
+apiVersion: kops.k8s.io/v1alpha2
 kind: InstanceGroup
 metadata:
   creationTimestamp: 2017-01-01T00:00:00Z
@@ -101,6 +110,8 @@ spec:
   machineType: t2.medium
   maxSize: 2
   minSize: 2
+  nodeLabels:
+    kops.k8s.io/instancegroup: nodes
   role: Node
   subnets:
   - us-test-1a

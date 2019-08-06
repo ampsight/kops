@@ -17,12 +17,10 @@ limitations under the License.
 package model
 
 import (
-	"k8s.io/kops/nodeup/pkg/distros"
+	"k8s.io/klog"
 	"k8s.io/kops/pkg/systemd"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/nodeup/nodetasks"
-
-	"github.com/golang/glog"
 )
 
 // FirewallBuilder configures the firewall (iptables)
@@ -34,10 +32,9 @@ var _ fi.ModelBuilder = &FirewallBuilder{}
 
 // Build is responsible for generating any node firewall rules
 func (b *FirewallBuilder) Build(c *fi.ModelBuilderContext) error {
-	if b.Distribution == distros.DistributionContainerOS {
-		c.AddTask(b.buildFirewallScript())
-		c.AddTask(b.buildSystemdService())
-	}
+	// We need forwarding enabled (https://github.com/kubernetes/kubernetes/issues/40182)
+	c.AddTask(b.buildFirewallScript())
+	c.AddTask(b.buildSystemdService())
 
 	return nil
 }
@@ -53,7 +50,7 @@ func (b *FirewallBuilder) buildSystemdService() *nodetasks.Service {
 	manifest.Set("Install", "WantedBy", "basic.target")
 
 	manifestString := manifest.Render()
-	glog.V(8).Infof("Built service manifest %q\n%s", "kubernetes-iptables-setup", manifestString)
+	klog.V(8).Infof("Built service manifest %q\n%s", "kubernetes-iptables-setup", manifestString)
 
 	service := &nodetasks.Service{
 		Name:       "kubernetes-iptables-setup.service",
@@ -89,11 +86,10 @@ iptables -A FORWARD -w -p UDP -j ACCEPT
 iptables -A FORWARD -w -p ICMP -j ACCEPT
 fi
 `
-	t := &nodetasks.File{
+	return &nodetasks.File{
 		Path:     "/home/kubernetes/bin/iptables-setup",
 		Contents: fi.NewStringResource(script),
 		Type:     nodetasks.FileType_File,
 		Mode:     s("0755"),
 	}
-	return t
 }

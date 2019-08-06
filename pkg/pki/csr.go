@@ -21,9 +21,10 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"fmt"
-	"github.com/golang/glog"
 	"math/big"
 	"time"
+
+	"k8s.io/klog"
 )
 
 // BuildPKISerial produces a serial number for certs that is vanishingly unlikely to collide
@@ -34,7 +35,7 @@ func BuildPKISerial(timestamp int64) *big.Int {
 	randomLimit := new(big.Int).Lsh(big.NewInt(1), 32)
 	randomComponent, err := crypto_rand.Int(crypto_rand.Reader, randomLimit)
 	if err != nil {
-		glog.Fatalf("error generating random number: %v", err)
+		klog.Fatalf("error generating random number: %v", err)
 	}
 
 	serial := big.NewInt(timestamp)
@@ -85,7 +86,7 @@ func SignNewCertificate(privateKey *PrivateKey, template *x509.Certificate, sign
 		template.KeyUsage = x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment
 	}
 
-	if template.ExtKeyUsage == nil {
+	if template.ExtKeyUsage == nil && !template.IsCA {
 		template.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
 	}
 	//c.SignatureAlgorithm  = do we want to overrride?

@@ -37,6 +37,7 @@ See [1.5.0-alpha4 commit](https://github.com/kubernetes/kops/commit/a60d7982e04c
 * Edit makefile
 * If updating dns-controller: bump version in Makefile, code, manifests, and tests
 
+`git commit -m "Release 1.X.Y`
 
 ## Check builds OK
 
@@ -55,7 +56,7 @@ make dns-controller-push DOCKER_REGISTRY=kope
 
 ```
 # export AWS_PROFILE=??? # If needed
-make upload S3_BUCKET=s3://kubeupv2
+make upload UPLOAD_DEST=s3://kubeupv2
 ```
 
 ## Tag new version
@@ -64,8 +65,8 @@ Make sure you are on the release branch `git checkout release-1.X`
 
 ```
 make release-tag
-git push
-git push --tags
+git push git@github.com:kubernetes/kops
+git push --tags git@github.com:kubernetes/kops
 ```
 
 ## Update release branch
@@ -73,7 +74,9 @@ git push --tags
 For the time being, we are also maintaining a release branch.  We push released
 versions to that.
 
-`git push origin release`
+`git push origin release-1.8:release`
+
+## Pull request to master branch (for release commit)
 
 ## Upload to github
 
@@ -86,7 +89,12 @@ make release-github
 
 ## Compile release notes
 
-e.g. `git log 1.5.0-alpha2..1.5.0-alpha3 > /tmp/relnotes`
+e.g.
+
+```
+git log 1.11.0-beta.1..1.11.0 --oneline | grep Merge.pull | cut -f 5 -d ' ' | tac  > ~/shipbot/prs
+relnotes  -config .shipbot.yaml  < ~/shipbot/prs  >> docs/releases/1.11-NOTES.md
+```
 
 ## On github
 
@@ -104,3 +112,8 @@ Once we are satisfied the release is sound:
 Once we are satisfied the release is stable:
 
 * Bump the kops recommended version in the stable channel
+
+## Update conformance results with CNCF
+
+Use the following instructions: https://github.com/cncf/k8s-conformance/blob/master/instructions.md
+

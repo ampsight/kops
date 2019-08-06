@@ -17,7 +17,7 @@ kops create cluster --topology private --networking $provider --bastion $NAME
 
 To add a bastion instance group to a pre-existing cluster, create a new instance group with the `--role Bastion` flag and one or more subnets (e.g. `utility-us-east-2a,utility-us-east-2b`). 
 ```yaml
-kops create instancegroup --role Bastion --subnet $SUBNET
+kops create instancegroup bastions --role Bastion --subnet $SUBNET
 ```
 
 ### Configure the bastion instance group
@@ -31,7 +31,7 @@ kops edit ig bastions --name $KOPS_NAME
 You should now be able to edit and configure your bastion instance group.
 
 ```yaml
-apiVersion: kops/v1alpha2
+apiVersion: kops.k8s.io/v1alpha2
 kind: InstanceGroup
 metadata:
   creationTimestamp: "2017-01-05T13:37:07Z"
@@ -62,7 +62,7 @@ The default bastion name is `bastion.$NAME` as in
 bastion.mycluster.example.com
 ```
 
-Unless a user is using `--dns-zone` which will inherently use the `basion-$ZONE` syntax.
+Unless a user is using `--dns-zone` which will inherently use the `bastion-$ZONE` syntax.
 
 You can define a custom bastion CNAME by editing the main cluster config `kops edit cluster $NAME` and modifying the following block
 

@@ -1,8 +1,7 @@
 approvers:
-- liggitt
-- deads2k
+- sig-auth-serviceaccounts-approvers
 reviewers:
-- liggitt
-- deads2k
-- mikedanese
-- ericchiang
+- sig-auth-serviceaccounts-reviewers
+labels:
+- sig/auth
+

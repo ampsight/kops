@@ -22,14 +22,13 @@ import (
 	"strings"
 
 	"github.com/blang/semver"
-	"github.com/golang/glog"
 	"github.com/spf13/cobra"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/klog"
+
 	"k8s.io/kops"
 	api "k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/apis/kops/util"
-	"k8s.io/kops/pkg/apis/kops/validation"
-	"k8s.io/kops/pkg/assets"
+	"k8s.io/kops/pkg/commands"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup"
 	"k8s.io/kops/util/pkg/tables"
@@ -46,9 +45,9 @@ var upgradeCluster UpgradeClusterCmd
 func init() {
 	cmd := &cobra.Command{
 		Use:     "cluster",
-		Short:   upgrade_short,
-		Long:    upgrade_long,
-		Example: upgrade_example,
+		Short:   upgradeShort,
+		Long:    upgradeLong,
+		Example: upgradeExample,
 		Run: func(cmd *cobra.Command, args []string) {
 			err := upgradeCluster.Run(args)
 			if err != nil {
@@ -57,7 +56,7 @@ func init() {
 		},
 	}
 
-	cmd.Flags().BoolVar(&upgradeCluster.Yes, "yes", false, "Apply update")
+	cmd.Flags().BoolVarP(&upgradeCluster.Yes, "yes", "y", false, "Apply update")
 	cmd.Flags().StringVar(&upgradeCluster.Channel, "channel", "", "Channel to use for upgrade")
 
 	upgradeCmd.AddCommand(cmd)
@@ -88,14 +87,9 @@ func (c *UpgradeClusterCmd) Run(args []string) error {
 		return err
 	}
 
-	list, err := clientset.InstanceGroupsFor(cluster).List(metav1.ListOptions{})
+	instanceGroups, err := commands.ReadAllInstanceGroups(clientset, cluster)
 	if err != nil {
 		return err
-	}
-
-	var instanceGroups []*api.InstanceGroup
-	for i := range list.Items {
-		instanceGroups = append(instanceGroups, &list.Items[i])
 	}
 
 	if cluster.ObjectMeta.Annotations[api.AnnotationNameManagement] == api.AnnotationValueManagementImported {
@@ -138,7 +132,7 @@ func (c *UpgradeClusterCmd) Run(args []string) error {
 	{
 		sv, err := util.ParseKubernetesVersion(cluster.Spec.KubernetesVersion)
 		if err != nil {
-			glog.Warningf("error parsing KubernetesVersion %q", cluster.Spec.KubernetesVersion)
+			klog.Warningf("error parsing KubernetesVersion %q", cluster.Spec.KubernetesVersion)
 		} else {
 			currentKubernetesVersion = sv
 		}
@@ -149,7 +143,7 @@ func (c *UpgradeClusterCmd) Run(args []string) error {
 	// We won't propose a downgrade
 	// TODO: What if a kubernetes version is bad?
 	if currentKubernetesVersion != nil && proposedKubernetesVersion != nil && currentKubernetesVersion.GT(*proposedKubernetesVersion) {
-		glog.Warningf("cluster version %q is greater than recommended version %q", *currentKubernetesVersion, *proposedKubernetesVersion)
+		klog.Warningf("cluster version %q is greater than recommended version %q", *currentKubernetesVersion, *proposedKubernetesVersion)
 		proposedKubernetesVersion = currentKubernetesVersion
 	}
 
@@ -202,7 +196,7 @@ func (c *UpgradeClusterCmd) Run(args []string) error {
 		image := channel.FindImage(cloud.ProviderID(), *proposedKubernetesVersion)
 
 		if image == nil {
-			glog.Warningf("No matching images specified in channel; cannot prompt for upgrade")
+			klog.Warningf("No matching images specified in channel; cannot prompt for upgrade")
 		} else {
 			for _, ig := range instanceGroups {
 				if strings.Contains(ig.Spec.Image, "kope.io") {
@@ -219,7 +213,7 @@ func (c *UpgradeClusterCmd) Run(args []string) error {
 						})
 					}
 				} else {
-					glog.Infof("Custom image (%s) has been provided for Instance Group %q; not updating image", ig.Spec.Image, ig.GetName())
+					klog.Infof("Custom image (%s) has been provided for Instance Group %q; not updating image", ig.Spec.Image, ig.GetName())
 				}
 			}
 		}
@@ -283,26 +277,7 @@ func (c *UpgradeClusterCmd) Run(args []string) error {
 			action.apply()
 		}
 
-		// TODO: DRY this chunk
-		err = cloudup.PerformAssignments(cluster)
-		if err != nil {
-			return fmt.Errorf("error populating configuration: %v", err)
-		}
-
-		assetBuilder := assets.NewAssetBuilder(cluster.Spec.Assets)
-		fullCluster, err := cloudup.PopulateClusterSpec(cluster, assetBuilder)
-		if err != nil {
-			return err
-		}
-
-		err = validation.DeepValidate(fullCluster, instanceGroups, true)
-		if err != nil {
-			return err
-		}
-
-		// Note we perform as much validation as we can, before writing a bad config
-		_, err = clientset.UpdateCluster(cluster)
-		if err != nil {
+		if err := commands.UpdateCluster(clientset, cluster, instanceGroups); err != nil {
 			return err
 		}
 

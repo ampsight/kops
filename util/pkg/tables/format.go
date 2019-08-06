@@ -19,12 +19,14 @@ package tables
 import (
 	"bytes"
 	"fmt"
-	"github.com/golang/glog"
 	"io"
-	"k8s.io/kops/upup/pkg/fi"
 	"reflect"
 	"sort"
 	"text/tabwriter"
+
+	"k8s.io/klog"
+
+	"k8s.io/kops/util/pkg/reflectutils"
 )
 
 // Table renders tables to stdout
@@ -43,7 +45,7 @@ func (c *TableColumn) getFromValue(v reflect.Value) string {
 	fvs := c.Getter.Call(args)
 	fv := fvs[0]
 
-	return fi.ValueAsString(fv)
+	return reflectutils.ValueAsString(fv)
 }
 
 type getterFunction func(interface{}) string
@@ -98,7 +100,7 @@ func (t *Table) findColumns(columnNames ...string) ([]*TableColumn, error) {
 func (t *Table) Render(items interface{}, out io.Writer, columnNames ...string) error {
 	itemsValue := reflect.ValueOf(items)
 	if itemsValue.Kind() != reflect.Slice {
-		glog.Fatal("unexpected kind for items: ", itemsValue.Kind())
+		klog.Fatal("unexpected kind for items: ", itemsValue.Kind())
 	}
 
 	columns, err := t.findColumns(columnNames...)

@@ -17,6 +17,7 @@ limitations under the License.
 package components
 
 import (
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/upup/pkg/fi/loader"
 )
@@ -28,6 +29,7 @@ type KubeDnsOptionsBuilder struct {
 
 var _ loader.OptionsBuilder = &KubeDnsOptionsBuilder{}
 
+// BuildOptions fills in the kubedns model
 func (b *KubeDnsOptionsBuilder) BuildOptions(o interface{}) error {
 	clusterSpec := o.(*kops.ClusterSpec)
 
@@ -36,15 +38,41 @@ func (b *KubeDnsOptionsBuilder) BuildOptions(o interface{}) error {
 	}
 
 	clusterSpec.KubeDNS.Replicas = 2
-	ip, err := WellKnownServiceIP(clusterSpec, 10)
-	if err != nil {
-		return err
+
+	if clusterSpec.KubeDNS.CacheMaxSize == 0 {
+		clusterSpec.KubeDNS.CacheMaxSize = 1000
 	}
-	clusterSpec.KubeDNS.ServerIP = ip.String()
-	clusterSpec.KubeDNS.Domain = clusterSpec.ClusterDNSDomain
-	// TODO: Once we start shipping more images, start using them
-	// TODO we need to pull this as this is no longer used
-	clusterSpec.KubeDNS.Image = "gcr.io/google_containers/kubedns-amd64:1.3"
+
+	if clusterSpec.KubeDNS.CacheMaxConcurrent == 0 {
+		clusterSpec.KubeDNS.CacheMaxConcurrent = 150
+	}
+
+	if clusterSpec.KubeDNS.ServerIP == "" {
+		ip, err := WellKnownServiceIP(clusterSpec, 10)
+		if err != nil {
+			return err
+		}
+		clusterSpec.KubeDNS.ServerIP = ip.String()
+	}
+
+	if clusterSpec.KubeDNS.Domain == "" {
+		clusterSpec.KubeDNS.Domain = clusterSpec.ClusterDNSDomain
+	}
+
+	if clusterSpec.KubeDNS.MemoryRequest == nil || clusterSpec.KubeDNS.MemoryRequest.IsZero() {
+		defaultMemoryRequest := resource.MustParse("70Mi")
+		clusterSpec.KubeDNS.MemoryRequest = &defaultMemoryRequest
+	}
+
+	if clusterSpec.KubeDNS.CPURequest == nil || clusterSpec.KubeDNS.CPURequest.IsZero() {
+		defaultCPURequest := resource.MustParse("100m")
+		clusterSpec.KubeDNS.CPURequest = &defaultCPURequest
+	}
+
+	if clusterSpec.KubeDNS.MemoryLimit == nil || clusterSpec.KubeDNS.MemoryLimit.IsZero() {
+		defaultMemoryLimit := resource.MustParse("170Mi")
+		clusterSpec.KubeDNS.MemoryLimit = &defaultMemoryLimit
+	}
 
 	return nil
 }

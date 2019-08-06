@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Copyright 2016 The Kubernetes Authors.
 #
@@ -20,7 +20,7 @@
 
 WORK_DIR=`mktemp -d`
 
-function cleanup {
+cleanup() {
   rm -rf "$WORK_DIR"
 }
 trap cleanup EXIT
@@ -28,12 +28,16 @@ trap cleanup EXIT
 mkdir -p ${WORK_DIR}/go/
 ln -s ${GOPATH}/src/k8s.io/kops/vendor/ ${WORK_DIR}/go/src
 
-GOPATH=${WORK_DIR}/go/ go install k8s.io/kubernetes/cmd/libs/go2idl/conversion-gen
+unset GOBIN
+GOPATH=${WORK_DIR}/go/ go install -v k8s.io/code-generator/cmd/conversion-gen/
 cp ${WORK_DIR}/go/bin/conversion-gen ${GOPATH}/bin/
 
-GOPATH=${WORK_DIR}/go/ go install k8s.io/kubernetes/cmd/libs/go2idl/defaulter-gen
+GOPATH=${WORK_DIR}/go/ go install k8s.io/code-generator/cmd/deepcopy-gen/
+cp ${WORK_DIR}/go/bin/deepcopy-gen ${GOPATH}/bin/
+
+GOPATH=${WORK_DIR}/go/ go install k8s.io/code-generator/cmd/defaulter-gen/
 cp ${WORK_DIR}/go/bin/defaulter-gen ${GOPATH}/bin/
 
-GOPATH=${WORK_DIR}/go/ go install k8s.io/kubernetes/cmd/libs/go2idl/client-gen
+GOPATH=${WORK_DIR}/go/ go install k8s.io/code-generator/cmd/client-gen/
 cp ${WORK_DIR}/go/bin/client-gen ${GOPATH}/bin/
 

@@ -146,10 +146,12 @@ func TestValidateSubnets(t *testing.T) {
 
 func TestValidateKubeAPIServer(t *testing.T) {
 	str := "foobar"
+	authzMode := "RBAC,Webhook"
 
 	grid := []struct {
 		Input          kops.KubeAPIServerConfig
 		ExpectedErrors []string
+		ExpectedDetail string
 	}{
 		{
 			Input: kops.KubeAPIServerConfig{
@@ -158,6 +160,7 @@ func TestValidateKubeAPIServer(t *testing.T) {
 			ExpectedErrors: []string{
 				"Invalid value::KubeAPIServer",
 			},
+			ExpectedDetail: "ProxyClientCertFile and ProxyClientKeyFile must both be specified (or not all)",
 		},
 		{
 			Input: kops.KubeAPIServerConfig{
@@ -166,12 +169,46 @@ func TestValidateKubeAPIServer(t *testing.T) {
 			ExpectedErrors: []string{
 				"Invalid value::KubeAPIServer",
 			},
+			ExpectedDetail: "ProxyClientCertFile and ProxyClientKeyFile must both be specified (or not all)",
+		},
+		{
+			Input: kops.KubeAPIServerConfig{
+				ServiceNodePortRange: str,
+			},
+			ExpectedErrors: []string{
+				"Invalid value::KubeAPIServer",
+			},
+		},
+		{
+			Input: kops.KubeAPIServerConfig{
+				AuthorizationMode: &authzMode,
+			},
+			ExpectedErrors: []string{
+				"Invalid value::KubeAPIServer",
+			},
+			ExpectedDetail: "Authorization mode Webhook requires AuthorizationWebhookConfigFile to be specified",
 		},
 	}
 	for _, g := range grid {
 		errs := validateKubeAPIServer(&g.Input, field.NewPath("KubeAPIServer"))
 
 		testErrors(t, g.Input, errs, g.ExpectedErrors)
+
+		if g.ExpectedDetail != "" {
+			found := false
+			for _, err := range errs {
+				if err.Detail == g.ExpectedDetail {
+					found = true
+				}
+			}
+			if !found {
+				for _, err := range errs {
+					t.Logf("found detail: %q", err.Detail)
+				}
+
+				t.Errorf("did not find expected error %q", g.ExpectedDetail)
+			}
+		}
 	}
 }
 
@@ -188,10 +225,145 @@ func Test_Validate_DockerConfig_Storage(t *testing.T) {
 		config := &kops.DockerConfig{Storage: &name}
 		errs := ValidateDockerConfig(config, field.NewPath("docker"))
 		if len(errs) != 1 {
-			t.Fatalf("Expected errors validating DockerConfig %q", config)
+			t.Fatalf("Expected errors validating DockerConfig %+v", config)
 		}
 		if errs[0].Field != "docker.storage" || errs[0].Type != field.ErrorTypeNotSupported {
 			t.Fatalf("Not the expected error validating DockerConfig %q", errs)
 		}
+	}
+}
+
+func Test_Validate_Networking_Flannel(t *testing.T) {
+
+	grid := []struct {
+		Input          kops.FlannelNetworkingSpec
+		ExpectedErrors []string
+	}{
+		{
+			Input: kops.FlannelNetworkingSpec{
+				Backend: "udp",
+			},
+		},
+		{
+			Input: kops.FlannelNetworkingSpec{
+				Backend: "vxlan",
+			},
+		},
+		{
+			Input: kops.FlannelNetworkingSpec{
+				Backend: "",
+			},
+			ExpectedErrors: []string{"Required value::Networking.Flannel.Backend"},
+		},
+		{
+			Input: kops.FlannelNetworkingSpec{
+				Backend: "nope",
+			},
+			ExpectedErrors: []string{"Unsupported value::Networking.Flannel.Backend"},
+		},
+	}
+	for _, g := range grid {
+		networking := &kops.NetworkingSpec{}
+		networking.Flannel = &g.Input
+
+		cluster := &kops.Cluster{}
+		cluster.Spec.Networking = networking
+
+		errs := validateNetworking(&cluster.Spec, networking, field.NewPath("Networking"))
+		testErrors(t, g.Input, errs, g.ExpectedErrors)
+	}
+}
+
+func Test_Validate_AdditionalPolicies(t *testing.T) {
+	grid := []struct {
+		Input          map[string]string
+		ExpectedErrors []string
+	}{
+		{
+			Input: map[string]string{},
+		},
+		{
+			Input: map[string]string{
+				"master": `[ { "Action": [ "s3:GetObject" ], "Resource": [ "*" ], "Effect": "Allow" } ]`,
+			},
+		},
+		{
+			Input: map[string]string{
+				"notarole": `[ { "Action": [ "s3:GetObject" ], "Resource": [ "*" ], "Effect": "Allow" } ]`,
+			},
+			ExpectedErrors: []string{"Invalid value::spec.additionalPolicies"},
+		},
+		{
+			Input: map[string]string{
+				"master": `badjson`,
+			},
+			ExpectedErrors: []string{"Invalid value::spec.additionalPolicies[master]"},
+		},
+		{
+			Input: map[string]string{
+				"master": `[ { "Action": [ "s3:GetObject" ], "Resource": [ "*" ] } ]`,
+			},
+			ExpectedErrors: []string{"Required value::spec.additionalPolicies[master][0].Effect"},
+		},
+		{
+			Input: map[string]string{
+				"master": `[ { "Action": [ "s3:GetObject" ], "Resource": [ "*" ], "Effect": "allow" } ]`,
+			},
+			ExpectedErrors: []string{"Invalid value::spec.additionalPolicies[master][0].Effect"},
+		},
+	}
+	for _, g := range grid {
+		clusterSpec := &kops.ClusterSpec{
+			AdditionalPolicies: &g.Input,
+			Subnets: []kops.ClusterSubnetSpec{
+				{Name: "subnet1"},
+			},
+		}
+		errs := validateClusterSpec(clusterSpec, field.NewPath("spec"))
+		testErrors(t, g.Input, errs, g.ExpectedErrors)
+	}
+}
+
+type caliInput struct {
+	Calico *kops.CalicoNetworkingSpec
+	Etcd   *kops.EtcdClusterSpec
+}
+
+func Test_Validate_Calico(t *testing.T) {
+	grid := []struct {
+		Input          caliInput
+		ExpectedErrors []string
+	}{
+		{
+			Input: caliInput{
+				Calico: &kops.CalicoNetworkingSpec{},
+				Etcd:   &kops.EtcdClusterSpec{},
+			},
+		},
+		{
+			Input: caliInput{
+				Calico: &kops.CalicoNetworkingSpec{
+					MajorVersion: "v3",
+				},
+				Etcd: &kops.EtcdClusterSpec{
+					Version: "3.2.18",
+				},
+			},
+		},
+		{
+			Input: caliInput{
+				Calico: &kops.CalicoNetworkingSpec{
+					MajorVersion: "v3",
+				},
+				Etcd: &kops.EtcdClusterSpec{
+					Version: "2.2.18",
+				},
+			},
+			ExpectedErrors: []string{"Invalid value::Calico.MajorVersion"},
+		},
+	}
+	for _, g := range grid {
+		errs := validateNetworkingCalico(g.Input.Calico, g.Input.Etcd, field.NewPath("Calico"))
+		testErrors(t, g.Input, errs, g.ExpectedErrors)
 	}
 }

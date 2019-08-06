@@ -17,13 +17,12 @@ limitations under the License.
 package model
 
 import (
-	"io/ioutil"
 	"strings"
 	"testing"
 
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/apis/nodeup"
-	"k8s.io/kops/pkg/diff"
+	"k8s.io/kops/pkg/testutils"
 )
 
 func Test_ProxyFunc(t *testing.T) {
@@ -41,69 +40,78 @@ func Test_ProxyFunc(t *testing.T) {
 		t.Fatalf("script cannot be empty")
 	}
 
-	if !strings.HasPrefix(script, "export http_proxy=http://example.com:80") {
+	if !strings.HasPrefix(script, "echo \"http_proxy=http://example.com:80\" >> /etc/environment") {
 		t.Fatalf("script not setting http_proxy properly")
 	}
 
 	ps.ProxyExcludes = "www.google.com,www.kubernetes.io"
 
 	script = b.createProxyEnv(ps)
-	if !strings.Contains(script, "export no_proxy="+ps.ProxyExcludes) {
+	if !strings.Contains(script, "no_proxy="+ps.ProxyExcludes) {
 		t.Fatalf("script not setting no_proxy properly")
 	}
 }
 
 func TestBootstrapUserData(t *testing.T) {
 	cs := []struct {
-		Role             kops.InstanceGroupRole
-		ExpectedFilePath string
-		HookSpecRoles    []kops.InstanceGroupRole
+		Role               kops.InstanceGroupRole
+		ExpectedFilePath   string
+		HookSpecRoles      []kops.InstanceGroupRole
+		FileAssetSpecRoles []kops.InstanceGroupRole
 	}{
 		{
-			Role:             "Master",
-			ExpectedFilePath: "tests/data/bootstrapscript_0.txt",
-			HookSpecRoles:    []kops.InstanceGroupRole{""},
+			Role:               "Master",
+			ExpectedFilePath:   "tests/data/bootstrapscript_0.txt",
+			HookSpecRoles:      []kops.InstanceGroupRole{""},
+			FileAssetSpecRoles: []kops.InstanceGroupRole{""},
 		},
 		{
-			Role:             "Master",
-			ExpectedFilePath: "tests/data/bootstrapscript_0.txt",
-			HookSpecRoles:    []kops.InstanceGroupRole{"Node"},
+			Role:               "Master",
+			ExpectedFilePath:   "tests/data/bootstrapscript_0.txt",
+			HookSpecRoles:      []kops.InstanceGroupRole{"Node"},
+			FileAssetSpecRoles: []kops.InstanceGroupRole{"Node"},
 		},
 		{
-			Role:             "Master",
-			ExpectedFilePath: "tests/data/bootstrapscript_1.txt",
-			HookSpecRoles:    []kops.InstanceGroupRole{"Master"},
+			Role:               "Master",
+			ExpectedFilePath:   "tests/data/bootstrapscript_1.txt",
+			HookSpecRoles:      []kops.InstanceGroupRole{"Master"},
+			FileAssetSpecRoles: []kops.InstanceGroupRole{"Master"},
 		},
 		{
-			Role:             "Master",
-			ExpectedFilePath: "tests/data/bootstrapscript_2.txt",
-			HookSpecRoles:    []kops.InstanceGroupRole{"Master", "Node"},
+			Role:               "Master",
+			ExpectedFilePath:   "tests/data/bootstrapscript_2.txt",
+			HookSpecRoles:      []kops.InstanceGroupRole{"Master", "Node"},
+			FileAssetSpecRoles: []kops.InstanceGroupRole{"Master", "Node"},
 		},
 		{
-			Role:             "Node",
-			ExpectedFilePath: "tests/data/bootstrapscript_3.txt",
-			HookSpecRoles:    []kops.InstanceGroupRole{""},
+			Role:               "Node",
+			ExpectedFilePath:   "tests/data/bootstrapscript_3.txt",
+			HookSpecRoles:      []kops.InstanceGroupRole{""},
+			FileAssetSpecRoles: []kops.InstanceGroupRole{""},
 		},
 		{
-			Role:             "Node",
-			ExpectedFilePath: "tests/data/bootstrapscript_4.txt",
-			HookSpecRoles:    []kops.InstanceGroupRole{"Node"},
+			Role:               "Node",
+			ExpectedFilePath:   "tests/data/bootstrapscript_4.txt",
+			HookSpecRoles:      []kops.InstanceGroupRole{"Node"},
+			FileAssetSpecRoles: []kops.InstanceGroupRole{"Node"},
 		},
 		{
-			Role:             "Node",
-			ExpectedFilePath: "tests/data/bootstrapscript_3.txt",
-			HookSpecRoles:    []kops.InstanceGroupRole{"Master"},
+			Role:               "Node",
+			ExpectedFilePath:   "tests/data/bootstrapscript_3.txt",
+			HookSpecRoles:      []kops.InstanceGroupRole{"Master"},
+			FileAssetSpecRoles: []kops.InstanceGroupRole{"Master"},
 		},
 		{
-			Role:             "Node",
-			ExpectedFilePath: "tests/data/bootstrapscript_5.txt",
-			HookSpecRoles:    []kops.InstanceGroupRole{"Master", "Node"},
+			Role:               "Node",
+			ExpectedFilePath:   "tests/data/bootstrapscript_5.txt",
+			HookSpecRoles:      []kops.InstanceGroupRole{"Master", "Node"},
+			FileAssetSpecRoles: []kops.InstanceGroupRole{"Master", "Node"},
 		},
 	}
 
 	for i, x := range cs {
-		spec := makeTestCluster(x.HookSpecRoles).Spec
-		group := makeTestInstanceGroup(x.Role, x.HookSpecRoles)
+		cluster := makeTestCluster(x.HookSpecRoles, x.FileAssetSpecRoles)
+		group := makeTestInstanceGroup(x.Role, x.HookSpecRoles, x.FileAssetSpecRoles)
 
 		renderNodeUpConfig := func(ig *kops.InstanceGroup) (*nodeup.Config, error) {
 			return &nodeup.Config{}, nil
@@ -115,7 +123,13 @@ func TestBootstrapUserData(t *testing.T) {
 			NodeUpConfigBuilder: renderNodeUpConfig,
 		}
 
-		res, err := bs.ResourceNodeUp(group, &spec)
+		// Purposely running this twice to cover issue #3516
+		_, err := bs.ResourceNodeUp(group, cluster)
+		if err != nil {
+			t.Errorf("case %d failed to create nodeup resource. error: %s", i, err)
+			continue
+		}
+		res, err := bs.ResourceNodeUp(group, cluster)
 		if err != nil {
 			t.Errorf("case %d failed to create nodeup resource. error: %s", i, err)
 			continue
@@ -127,20 +141,11 @@ func TestBootstrapUserData(t *testing.T) {
 			continue
 		}
 
-		expectedBytes, err := ioutil.ReadFile(x.ExpectedFilePath)
-		if err != nil {
-			t.Fatalf("unexpected error reading ExpectedFilePath %q: %v", x.ExpectedFilePath, err)
-		}
-
-		if actual != string(expectedBytes) {
-			diffString := diff.FormatDiff(string(expectedBytes), actual)
-			t.Errorf("case %d failed, actual output differed from expected.", i)
-			t.Logf("diff:\n%s\n", diffString)
-		}
+		testutils.AssertMatchesFile(t, actual, x.ExpectedFilePath)
 	}
 }
 
-func makeTestCluster(hookSpecRoles []kops.InstanceGroupRole) *kops.Cluster {
+func makeTestCluster(hookSpecRoles []kops.InstanceGroupRole, fileAssetSpecRoles []kops.InstanceGroupRole) *kops.Cluster {
 	return &kops.Cluster{
 		Spec: kops.ClusterSpec{
 			CloudProvider:     "aws",
@@ -158,6 +163,18 @@ func makeTestCluster(hookSpecRoles []kops.InstanceGroupRole) *kops.Cluster {
 							InstanceGroup: s("ig-1"),
 						},
 					},
+					Version: "3.1.11",
+				},
+				{
+					Name: "events",
+					Members: []*kops.EtcdMemberSpec{
+						{
+							Name:          "test",
+							InstanceGroup: s("ig-1"),
+						},
+					},
+					Version: "3.1.11",
+					Image:   "gcr.io/etcd-development/etcd:v3.1.11",
 				},
 			},
 			NetworkCIDR: "10.79.0.0/24",
@@ -174,7 +191,10 @@ func makeTestCluster(hookSpecRoles []kops.InstanceGroupRole) *kops.Cluster {
 				CloudProvider: "aws",
 			},
 			KubeProxy: &kops.KubeProxyConfig{
-				CPURequest: "30m",
+				CPURequest:    "30m",
+				CPULimit:      "30m",
+				MemoryRequest: "30Mi",
+				MemoryLimit:   "30Mi",
 				FeatureGates: map[string]string{
 					"AdvancedAuditing": "true",
 				},
@@ -200,18 +220,26 @@ func makeTestCluster(hookSpecRoles []kops.InstanceGroupRole) *kops.Cluster {
 						Command: []string{
 							"sh",
 							"-c",
-							"chroot /rootfs apt-get update && chroot /rootfs apt-get install -y ceph-common",
+							"apt-get update",
 						},
 						Image: "busybox",
 					},
 					Roles: hookSpecRoles,
 				},
 			},
+			FileAssets: []kops.FileAssetSpec{
+				{
+					Name:    "iptables-restore",
+					Path:    "/var/lib/iptables/rules-save",
+					Content: "blah blah",
+					Roles:   fileAssetSpecRoles,
+				},
+			},
 		},
 	}
 }
 
-func makeTestInstanceGroup(role kops.InstanceGroupRole, hookSpecRoles []kops.InstanceGroupRole) *kops.InstanceGroup {
+func makeTestInstanceGroup(role kops.InstanceGroupRole, hookSpecRoles []kops.InstanceGroupRole, fileAssetSpecRoles []kops.InstanceGroupRole) *kops.InstanceGroup {
 	return &kops.InstanceGroup{
 		Spec: kops.InstanceGroupSpec{
 			Kubelet: &kops.KubeletConfigSpec{
@@ -226,6 +254,9 @@ func makeTestInstanceGroup(role kops.InstanceGroupRole, hookSpecRoles []kops.Ins
 				"key1=value1:NoSchedule",
 				"key2=value2:NoExecute",
 			},
+			SuspendProcesses: []string{
+				"AZRebalance",
+			},
 			Hooks: []kops.HookSpec{
 				{
 					Name: "disable-update-engine.service",
@@ -238,6 +269,19 @@ func makeTestInstanceGroup(role kops.InstanceGroupRole, hookSpecRoles []kops.Ins
 				}, {
 					Name:     "apply-to-all.service",
 					Manifest: "Type=oneshot\nExecStart=/usr/bin/systemctl start apply-to-all.service",
+				},
+			},
+			FileAssets: []kops.FileAssetSpec{
+				{
+					Name:    "iptables-restore",
+					Path:    "/var/lib/iptables/rules-save",
+					Content: "blah blah",
+					Roles:   fileAssetSpecRoles,
+				},
+				{
+					Name:    "tokens",
+					Path:    "/kube/tokens.csv",
+					Content: "user,token",
 				},
 			},
 		},

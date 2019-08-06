@@ -18,16 +18,19 @@ package gcemodel
 
 import (
 	"fmt"
+	"strings"
 
-	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/klog"
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/model"
+	"k8s.io/kops/pkg/model/defaults"
+	"k8s.io/kops/pkg/model/iam"
 	"k8s.io/kops/upup/pkg/fi"
+	"k8s.io/kops/upup/pkg/fi/cloudup/gce"
 	"k8s.io/kops/upup/pkg/fi/cloudup/gcetasks"
 )
 
 const (
-	DefaultVolumeSize = 100
 	DefaultVolumeType = "pd-standard"
 )
 
@@ -45,7 +48,7 @@ func (b *AutoscalingGroupModelBuilder) Build(c *fi.ModelBuilderContext) error {
 	for _, ig := range b.InstanceGroups {
 		name := b.SafeObjectName(ig.ObjectMeta.Name)
 
-		startupScript, err := b.BootstrapScript.ResourceNodeUp(ig, &b.Cluster.Spec)
+		startupScript, err := b.BootstrapScript.ResourceNodeUp(ig, b.Cluster)
 		if err != nil {
 			return err
 		}
@@ -55,23 +58,27 @@ func (b *AutoscalingGroupModelBuilder) Build(c *fi.ModelBuilderContext) error {
 		{
 			volumeSize := fi.Int32Value(ig.Spec.RootVolumeSize)
 			if volumeSize == 0 {
-				volumeSize = DefaultVolumeSize
+				volumeSize, err = defaults.DefaultInstanceGroupVolumeSize(ig.Spec.Role)
+				if err != nil {
+					return err
+				}
 			}
 			volumeType := fi.StringValue(ig.Spec.RootVolumeType)
 			if volumeType == "" {
 				volumeType = DefaultVolumeType
 			}
 
+			namePrefix := gce.LimitedLengthName(name, gcetasks.InstanceTemplateNamePrefixMaxLength)
+
 			t := &gcetasks.InstanceTemplate{
 				Name:           s(name),
+				NamePrefix:     s(namePrefix),
 				Lifecycle:      b.Lifecycle,
 				Network:        b.LinkToNetwork(),
 				MachineType:    s(ig.Spec.MachineType),
 				BootDiskType:   s(volumeType),
 				BootDiskSizeGB: i64(int64(volumeSize)),
 				BootDiskImage:  s(ig.Spec.Image),
-
-				CanIPForward: fi.Bool(true),
 
 				// TODO: Support preemptible nodes?
 				Preemptible: fi.Bool(false),
@@ -80,7 +87,6 @@ func (b *AutoscalingGroupModelBuilder) Build(c *fi.ModelBuilderContext) error {
 					"compute-rw",
 					"monitoring",
 					"logging-write",
-					"storage-ro",
 				},
 
 				Metadata: map[string]*fi.ResourceHolder{
@@ -88,6 +94,26 @@ func (b *AutoscalingGroupModelBuilder) Build(c *fi.ModelBuilderContext) error {
 					//"config": resources/config.yaml $nodeset.Name
 					"cluster-name": fi.WrapResource(fi.NewStringResource(b.ClusterName())),
 				},
+			}
+
+			storagePaths, err := iam.WriteableVFSPaths(b.Cluster, ig.Spec.Role)
+			if err != nil {
+				return err
+			}
+			if len(storagePaths) == 0 {
+				t.Scopes = append(t.Scopes, "storage-ro")
+			} else {
+				klog.Warningf("enabling storage-rw for etcd backups")
+				t.Scopes = append(t.Scopes, "storage-rw")
+			}
+
+			if len(b.SSHPublicKeys) > 0 {
+				var gFmtKeys []string
+				for _, key := range b.SSHPublicKeys {
+					gFmtKeys = append(gFmtKeys, fmt.Sprintf("%s: %s", fi.SecretNameSSHPrimary, key))
+				}
+
+				t.Metadata["ssh-keys"] = fi.WrapResource(fi.NewStringResource(strings.Join(gFmtKeys, "\n")))
 			}
 
 			switch ig.Spec.Role {
@@ -98,6 +124,17 @@ func (b *AutoscalingGroupModelBuilder) Build(c *fi.ModelBuilderContext) error {
 
 			case kops.InstanceGroupRoleNode:
 				t.Tags = append(t.Tags, b.GCETagForRole(kops.InstanceGroupRoleNode))
+			}
+
+			if gce.UsesIPAliases(b.Cluster) {
+				t.CanIPForward = fi.Bool(false)
+
+				t.AliasIPRanges = map[string]string{
+					b.NameForIPAliasRange("pods"): "/24",
+				}
+				t.Subnet = b.LinkToIPAliasSubnet()
+			} else {
+				t.CanIPForward = fi.Bool(true)
 			}
 
 			//labels, err := b.CloudTagsForInstanceGroup(ig)
@@ -112,21 +149,10 @@ func (b *AutoscalingGroupModelBuilder) Build(c *fi.ModelBuilderContext) error {
 		}
 
 		// AutoscalingGroup
-		zones := sets.NewString()
-		for _, subnetName := range ig.Spec.Subnets {
-			subnet := b.FindSubnet(subnetName)
-			if subnet == nil {
-				return fmt.Errorf("subnet %q not found", subnetName)
-			}
-			if subnet.Zone == "" {
-				return fmt.Errorf("subnet %q has not Zone", subnetName)
-			}
-			zones.Insert(subnet.Zone)
+		zones, err := b.FindZonesForInstanceGroup(ig)
+		if err != nil {
+			return err
 		}
-
-		zoneList := zones.List()
-		targetSizes := make([]int, len(zoneList), len(zoneList))
-		totalSize := 0
 
 		// TODO: Duplicated from aws - move to defaults?
 		minSize := 1
@@ -136,8 +162,16 @@ func (b *AutoscalingGroupModelBuilder) Build(c *fi.ModelBuilderContext) error {
 			minSize = 2
 		}
 
-		for i := range zoneList {
-			targetSizes[i] = minSize / zones.Len()
+		// We have to assign instances to the various zones
+		// TODO: Switch to regional managed instance group
+		// But we can't yet use RegionInstanceGroups:
+		// 1) no support in terraform
+		// 2) we can't steer to specific zones AFAICT, only to all zones in the region
+
+		targetSizes := make([]int, len(zones), len(zones))
+		totalSize := 0
+		for i := range zones {
+			targetSizes[i] = minSize / len(zones)
 			totalSize += targetSizes[i]
 		}
 		i := 0
@@ -155,11 +189,9 @@ func (b *AutoscalingGroupModelBuilder) Build(c *fi.ModelBuilderContext) error {
 		}
 
 		for i, targetSize := range targetSizes {
-			zone := zoneList[i]
+			zone := zones[i]
 
-			// TODO: Switch to regional managed instance group
-
-			name := b.SafeObjectName(zone + "." + ig.ObjectMeta.Name)
+			name := gce.NameForInstanceGroupManager(b.Cluster, ig, zone)
 
 			t := &gcetasks.InstanceGroupManager{
 				Name:             s(name),

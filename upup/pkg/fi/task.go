@@ -18,9 +18,10 @@ package fi
 
 import (
 	"fmt"
-	"github.com/golang/glog"
 	"reflect"
 	"strings"
+
+	"k8s.io/klog"
 )
 
 type Task interface {
@@ -45,15 +46,17 @@ type ModelBuilder interface {
 
 // ModelBuilderContext is a context object that holds state we want to pass to ModelBuilder
 type ModelBuilderContext struct {
-	Tasks map[string]Task
+	Tasks              map[string]Task
+	LifecycleOverrides map[string]Lifecycle
 }
 
 func (c *ModelBuilderContext) AddTask(task Task) {
+	task = c.setLifecycleOverride(task)
 	key := buildTaskKey(task)
 
 	existing, found := c.Tasks[key]
 	if found {
-		glog.Fatalf("found duplicate tasks with name %q: %v and %v", key, task, existing)
+		klog.Fatalf("found duplicate tasks with name %q: %v and %v", key, task, existing)
 	}
 	c.Tasks[key] = task
 }
@@ -63,17 +66,18 @@ func (c *ModelBuilderContext) AddTask(task Task) {
 // If it does exist, it verifies that the existing task reflect.DeepEqual the new task,
 // if they are different an error is returned.
 func (c *ModelBuilderContext) EnsureTask(task Task) error {
+	task = c.setLifecycleOverride(task)
 	key := buildTaskKey(task)
 
 	existing, found := c.Tasks[key]
 	if found {
 		if reflect.DeepEqual(task, existing) {
-			glog.V(8).Infof("EnsureTask ignoring identical ")
+			klog.V(8).Infof("EnsureTask ignoring identical ")
 			return nil
 		} else {
-			glog.Warningf("EnsureTask found task mismatch for %q", key)
-			glog.Warningf("\tExisting: %v", existing)
-			glog.Warningf("\tNew: %v", task)
+			klog.Warningf("EnsureTask found task mismatch for %q", key)
+			klog.Warningf("\tExisting: %v", existing)
+			klog.Warningf("\tNew: %v", task)
 
 			return fmt.Errorf("cannot add different task with same key %q", key)
 		}
@@ -82,15 +86,41 @@ func (c *ModelBuilderContext) EnsureTask(task Task) error {
 	return nil
 }
 
+// setLifecycleOverride determines if a Lifecycle is in the LifecycleOverrides map for the current task.
+// If the lifecycle exist then the task lifecycle is set to the lifecycle provides in LifecycleOverrides.
+// This func allows for lifecycles to be passed in dynamically and have the task lifecycle set accordingly.
+func (c *ModelBuilderContext) setLifecycleOverride(task Task) Task {
+	// TODO(@chrislovecnm) - wonder if we should update the nodeup tasks to have lifecycle
+	// TODO - so that we can return an error here, rather than just returning.
+	// certain tasks have not implemented HasLifecycle interface
+	hl, ok := task.(HasLifecycle)
+	if !ok {
+		klog.V(8).Infof("task %T does not implement HasLifecycle", task)
+		return task
+	}
+
+	typeName := TypeNameForTask(task)
+	klog.V(8).Infof("testing task %q", typeName)
+
+	// typeName can be values like "InternetGateway"
+	value, ok := c.LifecycleOverrides[typeName]
+	if ok {
+		klog.Warningf("overriding task %s, lifecycle %s", task, value)
+		hl.SetLifecycle(value)
+	}
+
+	return task
+}
+
 func buildTaskKey(task Task) string {
 	hasName, ok := task.(HasName)
 	if !ok {
-		glog.Fatalf("task %T does not implement HasName", task)
+		klog.Fatalf("task %T does not implement HasName", task)
 	}
 
 	name := StringValue(hasName.GetName())
 	if name == "" {
-		glog.Fatalf("task %T (%v) did not have a Name", task, task)
+		klog.Fatalf("task %T (%v) did not have a Name", task, task)
 	}
 
 	typeName := TypeNameForTask(task)

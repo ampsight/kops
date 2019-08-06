@@ -24,19 +24,26 @@ import (
 	"strings"
 	"time"
 
-	"github.com/golang/glog"
 	compute "google.golang.org/api/compute/v0.beta"
+	"k8s.io/klog"
 	"k8s.io/kops/pkg/diff"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/gce"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraform"
 )
 
+// InstanceTemplateNamePrefixMaxLength is the max length for the NamePrefix of an InstanceTemplate
+//  52 = 63 - 10 - 1; 63 is the GCE limit; 10 is the length of seconds since epoch; and one for the dash
+const InstanceTemplateNamePrefixMaxLength = 63 - 10 - 1
+
 // InstanceTemplate represents a GCE InstanceTemplate
 //go:generate fitask -type=InstanceTemplate
 type InstanceTemplate struct {
-	// Name will be used for as the name prefix
-	Name      *string
+	Name *string
+
+	// NamePrefix is used as the prefix for the names; we add a timestamp.  Max = InstanceTemplateNamePrefixMaxLength
+	NamePrefix *string
+
 	Lifecycle *fi.Lifecycle
 
 	Network *Network
@@ -48,8 +55,9 @@ type InstanceTemplate struct {
 	BootDiskSizeGB *int64
 	BootDiskType   *string
 
-	CanIPForward *bool
-	Subnet       *Subnet
+	CanIPForward  *bool
+	Subnet        *Subnet
+	AliasIPRanges map[string]string
 
 	Scopes []string
 
@@ -77,13 +85,13 @@ func (e *InstanceTemplate) Find(c *fi.Context) (*InstanceTemplate, error) {
 		return nil, fmt.Errorf("error listing InstanceTemplates: %v", err)
 	}
 
-	expected, err := e.mapToGCE(cloud.Project())
+	expected, err := e.mapToGCE(cloud.Project(), cloud.Region())
 	if err != nil {
 		return nil, err
 	}
 
 	for _, r := range response.Items {
-		if !strings.HasPrefix(r.Name, fi.StringValue(e.Name)) {
+		if !strings.HasPrefix(r.Name, fi.StringValue(e.NamePrefix)+"-") {
 			continue
 		}
 
@@ -115,6 +123,17 @@ func (e *InstanceTemplate) Find(c *fi.Context) (*InstanceTemplate, error) {
 		if len(p.NetworkInterfaces) != 0 {
 			ni := p.NetworkInterfaces[0]
 			actual.Network = &Network{Name: fi.String(lastComponent(ni.Network))}
+
+			if len(ni.AliasIpRanges) != 0 {
+				actual.AliasIPRanges = make(map[string]string)
+				for _, aliasIPRange := range ni.AliasIpRanges {
+					actual.AliasIPRanges[aliasIPRange.SubnetworkRangeName] = aliasIPRange.IpCidrRange
+				}
+			}
+
+			if ni.Subnetwork != "" {
+				actual.Subnet = &Subnet{Name: fi.String(lastComponent(ni.Subnetwork))}
+			}
 		}
 
 		for _, serviceAccount := range p.ServiceAccounts {
@@ -149,17 +168,21 @@ func (e *InstanceTemplate) Find(c *fi.Context) (*InstanceTemplate, error) {
 		if p.Metadata != nil {
 			actual.Metadata = make(map[string]*fi.ResourceHolder)
 			for _, meta := range p.Metadata.Items {
-				actual.Metadata[meta.Key] = fi.WrapResource(fi.NewStringResource(meta.Value))
+				actual.Metadata[meta.Key] = fi.WrapResource(fi.NewStringResource(fi.StringValue(meta.Value)))
 			}
 		}
 
 		// Prevent spurious changes
 		actual.Name = e.Name
+		actual.NamePrefix = e.NamePrefix
 
 		actual.ID = &r.Name
 		if e.ID == nil {
 			e.ID = actual.ID
 		}
+
+		// System fields
+		actual.Lifecycle = e.Lifecycle
 
 		return actual, nil
 	}
@@ -181,26 +204,26 @@ func (_ *InstanceTemplate) CheckChanges(a, e, changes *InstanceTemplate) error {
 	return nil
 }
 
-func (e *InstanceTemplate) mapToGCE(project string) (*compute.InstanceTemplate, error) {
+func (e *InstanceTemplate) mapToGCE(project string, region string) (*compute.InstanceTemplate, error) {
 	// TODO: This is similar to Instance...
 	var scheduling *compute.Scheduling
 
 	if fi.BoolValue(e.Preemptible) {
 		scheduling = &compute.Scheduling{
-			AutomaticRestart:  false,
+			AutomaticRestart:  fi.Bool(false),
 			OnHostMaintenance: "TERMINATE",
 			Preemptible:       true,
 		}
 	} else {
 		scheduling = &compute.Scheduling{
-			AutomaticRestart: true,
+			AutomaticRestart: fi.Bool(true),
 			// TODO: Migrate or terminate?
 			OnHostMaintenance: "MIGRATE",
 			Preemptible:       false,
 		}
 	}
 
-	glog.Infof("We should be using NVME for GCE")
+	klog.Infof("We should be using NVME for GCE")
 
 	var disks []*compute.AttachedDisk
 	disks = append(disks, &compute.AttachedDisk{
@@ -227,15 +250,25 @@ func (e *InstanceTemplate) mapToGCE(project string) (*compute.InstanceTemplate, 
 
 	var networkInterfaces []*compute.NetworkInterface
 	ni := &compute.NetworkInterface{
+		Kind: "compute#networkInterface",
 		AccessConfigs: []*compute.AccessConfig{{
 			Kind: "compute#accessConfig",
 			//NatIP: *e.IPAddress.Address,
-			Type: "ONE_TO_ONE_NAT",
+			Type:        "ONE_TO_ONE_NAT",
+			NetworkTier: "PREMIUM",
 		}},
 		Network: e.Network.URL(project),
 	}
 	if e.Subnet != nil {
-		ni.Subnetwork = *e.Subnet.Name
+		ni.Subnetwork = e.Subnet.URL(project, region)
+	}
+	if e.AliasIPRanges != nil {
+		for k, v := range e.AliasIPRanges {
+			ni.AliasIpRanges = append(ni.AliasIpRanges, &compute.AliasIpRange{
+				SubnetworkRangeName: k,
+				IpCidrRange:         v,
+			})
+		}
 	}
 	networkInterfaces = append(networkInterfaces, ni)
 
@@ -261,7 +294,7 @@ func (e *InstanceTemplate) mapToGCE(project string) (*compute.InstanceTemplate, 
 		}
 		metadataItems = append(metadataItems, &compute.MetadataItems{
 			Key:   key,
-			Value: v,
+			Value: fi.String(v),
 		})
 	}
 
@@ -322,11 +355,11 @@ func matches(l, r *compute.InstanceTemplate) bool {
 	normalizedR := normalize(r)
 
 	if !reflect.DeepEqual(normalizedL, normalizedR) {
-		if glog.V(10) {
+		if klog.V(10) {
 			ls := fi.DebugAsJsonStringIndent(normalizedL)
 			rs := fi.DebugAsJsonStringIndent(normalizedR)
-			glog.V(10).Infof("Not equal")
-			glog.V(10).Infof(diff.FormatDiff(ls, rs))
+			klog.V(10).Infof("Not equal")
+			klog.V(10).Infof(diff.FormatDiff(ls, rs))
 		}
 		return false
 	}
@@ -343,16 +376,17 @@ func (e *InstanceTemplate) URL(project string) (string, error) {
 
 func (_ *InstanceTemplate) RenderGCE(t *gce.GCEAPITarget, a, e, changes *InstanceTemplate) error {
 	project := t.Cloud.Project()
+	region := t.Cloud.Region()
 
-	i, err := e.mapToGCE(project)
+	i, err := e.mapToGCE(project, region)
 	if err != nil {
 		return err
 	}
 
 	if a == nil {
-		glog.V(4).Infof("Creating InstanceTemplate %v", i)
+		klog.V(4).Infof("Creating InstanceTemplate %v", i)
 
-		name := fi.StringValue(e.Name) + "-" + strconv.FormatInt(time.Now().Unix(), 10)
+		name := fi.StringValue(e.NamePrefix) + "-" + strconv.FormatInt(time.Now().Unix(), 10)
 		e.ID = &name
 		i.Name = name
 
@@ -377,15 +411,15 @@ type terraformInstanceTemplate struct {
 }
 
 type terraformInstanceCommon struct {
-	CanIPForward          bool                         `json:"can_ip_forward"`
-	MachineType           string                       `json:"machine_type,omitempty"`
-	ServiceAccount        *terraformServiceAccount     `json:"service_account,omitempty"`
-	Scheduling            *terraformScheduling         `json:"scheduling,omitempty"`
-	Disks                 []*terraformAttachedDisk     `json:"disk,omitempty"`
-	NetworkInterfaces     []*terraformNetworkInterface `json:"network_interface,omitempty"`
-	Metadata              map[string]string            `json:"metadata,omitempty"`
-	MetadataStartupScript string                       `json:"metadata_startup_script,omitempty"`
-	Tags                  []string                     `json:"tags,omitempty"`
+	CanIPForward          bool                          `json:"can_ip_forward"`
+	MachineType           string                        `json:"machine_type,omitempty"`
+	ServiceAccount        *terraformServiceAccount      `json:"service_account,omitempty"`
+	Scheduling            *terraformScheduling          `json:"scheduling,omitempty"`
+	Disks                 []*terraformAttachedDisk      `json:"disk,omitempty"`
+	NetworkInterfaces     []*terraformNetworkInterface  `json:"network_interface,omitempty"`
+	Metadata              map[string]*terraform.Literal `json:"metadata,omitempty"`
+	MetadataStartupScript *terraform.Literal            `json:"metadata_startup_script,omitempty"`
+	Tags                  []string                      `json:"tags,omitempty"`
 
 	// Only for instances:
 	Zone string `json:"zone,omitempty"`
@@ -463,17 +497,23 @@ func (t *terraformInstanceCommon) AddNetworks(network *Network, subnet *Subnet, 
 	}
 }
 
-func (t *terraformInstanceCommon) AddMetadata(metadata *compute.Metadata) {
+func (t *terraformInstanceCommon) AddMetadata(target *terraform.TerraformTarget, name string, metadata *compute.Metadata) error {
 	if metadata != nil {
 		if t.Metadata == nil {
-			t.Metadata = make(map[string]string)
+			t.Metadata = make(map[string]*terraform.Literal)
 		}
 		for _, g := range metadata.Items {
-			value := g.Value
-			tfValue := strings.Replace(value, "${", "$${", -1)
-			t.Metadata[g.Key] = tfValue
+			v := fi.NewStringResource(fi.StringValue(g.Value))
+			tfResource, err := target.AddFile("google_compute_instance_template", name, "metadata_"+g.Key, v)
+			if err != nil {
+				return err
+			}
+
+			t.Metadata[g.Key] = tfResource
 		}
 	}
+
+	return nil
 }
 
 func (t *terraformInstanceCommon) AddServiceAccounts(serviceAccounts []*compute.ServiceAccount) {
@@ -490,13 +530,15 @@ func (t *terraformInstanceCommon) AddServiceAccounts(serviceAccounts []*compute.
 func (_ *InstanceTemplate) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *InstanceTemplate) error {
 	project := t.Project
 
-	i, err := e.mapToGCE(project)
+	i, err := e.mapToGCE(project, t.Region)
 	if err != nil {
 		return err
 	}
 
+	name := fi.StringValue(e.Name)
+
 	tf := &terraformInstanceTemplate{
-		NamePrefix: fi.StringValue(e.Name),
+		NamePrefix: fi.StringValue(e.NamePrefix) + "-",
 	}
 
 	tf.CanIPForward = i.Properties.CanIpForward
@@ -525,17 +567,17 @@ func (_ *InstanceTemplate) RenderTerraform(t *terraform.TerraformTarget, a, e, c
 
 	tf.AddNetworks(e.Network, e.Subnet, i.Properties.NetworkInterfaces)
 
-	tf.AddMetadata(i.Properties.Metadata)
+	tf.AddMetadata(t, name, i.Properties.Metadata)
 
 	if i.Properties.Scheduling != nil {
 		tf.Scheduling = &terraformScheduling{
-			AutomaticRestart:  i.Properties.Scheduling.AutomaticRestart,
+			AutomaticRestart:  fi.BoolValue(i.Properties.Scheduling.AutomaticRestart),
 			OnHostMaintenance: i.Properties.Scheduling.OnHostMaintenance,
 			Preemptible:       i.Properties.Scheduling.Preemptible,
 		}
 	}
 
-	return t.RenderResource("google_compute_instance_template", i.Name, tf)
+	return t.RenderResource("google_compute_instance_template", name, tf)
 }
 
 func (i *InstanceTemplate) TerraformLink() *terraform.Literal {

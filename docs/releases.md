@@ -5,7 +5,7 @@
 * A majority of maintainers must agree on a single commit SHA for the release. The agreement should be documented in the release notes.
 * The maintainers will match the commit SHA to the release `major.minor.patch` in the release notes
 * The maintainers will agree on a changelog proposal that MUST be in a PR prior to the release.
-* The main `REAMDE.md` must also reflect the new release. Ideally this should be in the same PR.
+* The main `README.md` must also reflect the new release. Ideally this should be in the same PR.
 
 #### 2. Merge the release notes
 
@@ -49,7 +49,7 @@
 * Announce the new release on twitter under the *k8sops* account
 * Announce the new release on slack
 
-##### 9. Clean up
+#### 9. Clean up
 
 * Validate the release milestone has been cleaned in github.
 * All remaining issues need to be bumped to the backlog, or the next milestone

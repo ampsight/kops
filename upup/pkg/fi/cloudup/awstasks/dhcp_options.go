@@ -19,14 +19,15 @@ package awstasks
 import (
 	"fmt"
 
+	"strings"
+
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ec2"
-	"github.com/golang/glog"
+	"k8s.io/klog"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
 	"k8s.io/kops/upup/pkg/fi/cloudup/cloudformation"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraform"
-	"strings"
 )
 
 //go:generate fitask -type=DHCPOptions
@@ -37,6 +38,12 @@ type DHCPOptions struct {
 	ID                *string
 	DomainName        *string
 	DomainNameServers *string
+
+	// Shared is set if this is a shared DHCPOptions
+	Shared *bool
+
+	// Tags is a map of aws tags that are added to the InternetGateway
+	Tags map[string]string
 }
 
 var _ fi.CompareWithID = &DHCPOptions{}
@@ -67,11 +74,12 @@ func (e *DHCPOptions) Find(c *fi.Context) (*DHCPOptions, error) {
 	if len(response.DhcpOptions) != 1 {
 		return nil, fmt.Errorf("found multiple DhcpOptions with name: %s", *e.Name)
 	}
-	glog.V(2).Info("found existing DhcpOptions")
+	klog.V(2).Info("found existing DhcpOptions")
 	o := response.DhcpOptions[0]
 	actual := &DHCPOptions{
 		ID:   o.DhcpOptionsId,
 		Name: findNameTag(o.Tags),
+		Tags: intersectTags(o.Tags, e.Tags),
 	}
 
 	for _, s := range o.DhcpConfigurations {
@@ -89,7 +97,7 @@ func (e *DHCPOptions) Find(c *fi.Context) (*DHCPOptions, error) {
 		case "domain-name-servers":
 			actual.DomainNameServers = &v
 		default:
-			glog.Infof("Skipping over DHCPOption with key=%q value=%q", k, v)
+			klog.Infof("Skipping over DHCPOption with key=%q value=%q", k, v)
 		}
 	}
 
@@ -97,6 +105,7 @@ func (e *DHCPOptions) Find(c *fi.Context) (*DHCPOptions, error) {
 
 	// Avoid spurious changes
 	actual.Lifecycle = e.Lifecycle
+	actual.Shared = e.Shared
 
 	return actual, nil
 }
@@ -130,7 +139,7 @@ func (s *DHCPOptions) CheckChanges(a, e, changes *DHCPOptions) error {
 
 func (_ *DHCPOptions) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *DHCPOptions) error {
 	if a == nil {
-		glog.V(2).Infof("Creating DHCPOptions with Name:%q", *e.Name)
+		klog.V(2).Infof("Creating DHCPOptions with Name:%q", *e.Name)
 
 		request := &ec2.CreateDhcpOptionsInput{}
 		if e.DomainNameServers != nil {
@@ -156,7 +165,7 @@ func (_ *DHCPOptions) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *DHCPOption
 		e.ID = response.DhcpOptions.DhcpOptionsId
 	}
 
-	return t.AddAWSTags(*e.ID, t.Cloud.BuildTags(e.Name))
+	return t.AddAWSTags(*e.ID, e.Tags)
 }
 
 type terraformDHCPOptions struct {
@@ -166,11 +175,9 @@ type terraformDHCPOptions struct {
 }
 
 func (_ *DHCPOptions) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *DHCPOptions) error {
-	cloud := t.Cloud.(awsup.AWSCloud)
-
 	tf := &terraformDHCPOptions{
 		DomainName: e.DomainName,
-		Tags:       cloud.BuildTags(e.Name),
+		Tags:       e.Tags,
 	}
 
 	if e.DomainNameServers != nil {
@@ -191,11 +198,9 @@ type cloudformationDHCPOptions struct {
 }
 
 func (_ *DHCPOptions) RenderCloudformation(t *cloudformation.CloudformationTarget, a, e, changes *DHCPOptions) error {
-	cloud := t.Cloud.(awsup.AWSCloud)
-
 	cf := &cloudformationDHCPOptions{
 		DomainName: e.DomainName,
-		Tags:       buildCloudformationTags(cloud.BuildTags(e.Name)),
+		Tags:       buildCloudformationTags(e.Tags),
 	}
 
 	if e.DomainNameServers != nil {

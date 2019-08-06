@@ -19,14 +19,15 @@ package templates
 import (
 	"bytes"
 	"fmt"
-	"github.com/golang/glog"
 	"io"
-	"k8s.io/kops/pkg/apis/kops"
-	"k8s.io/kops/upup/pkg/fi"
-	"k8s.io/kops/util/pkg/vfs"
 	"os"
 	"strings"
 	"text/template"
+
+	"k8s.io/klog"
+	"k8s.io/kops/pkg/apis/kops"
+	"k8s.io/kops/upup/pkg/fi"
+	"k8s.io/kops/util/pkg/vfs"
 )
 
 type Templates struct {
@@ -76,7 +77,7 @@ func (t *Templates) loadFrom(base vfs.Path) error {
 		var resource fi.Resource
 		if strings.HasSuffix(key, ".template") {
 			key = strings.TrimSuffix(key, ".template")
-			glog.V(6).Infof("loading (templated) resource %q", key)
+			klog.V(6).Infof("loading (templated) resource %q", key)
 
 			resource = &templateResource{
 				template: string(contents),
@@ -84,7 +85,7 @@ func (t *Templates) loadFrom(base vfs.Path) error {
 				key:      key,
 			}
 		} else {
-			glog.V(6).Infof("loading resource %q", key)
+			klog.V(6).Infof("loading resource %q", key)
 			resource = fi.NewBytesResource(contents)
 
 		}

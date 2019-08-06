@@ -26,8 +26,8 @@ package cloudup
 import (
 	"fmt"
 
-	"github.com/golang/glog"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/klog"
 	api "k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/apis/kops/util"
 	"k8s.io/kops/upup/pkg/fi"
@@ -36,45 +36,34 @@ import (
 func buildCloudupTags(cluster *api.Cluster) (sets.String, error) {
 	tags := sets.NewString()
 
-	networking := cluster.Spec.Networking
-
-	if networking == nil || networking.Classic != nil {
-		tags.Insert("_networking_classic")
-	} else if networking.Kubenet != nil {
-		tags.Insert("_networking_kubenet")
-	} else if networking.External != nil {
-		// external is based on kubenet
-		tags.Insert("_networking_kubenet", "_networking_external")
-	} else if networking.CNI != nil || networking.Weave != nil || networking.Flannel != nil || networking.Calico != nil || networking.Canal != nil || networking.Kuberouter != nil {
-		tags.Insert("_networking_cni")
-	} else if networking.Kopeio != nil {
-		// TODO combine with the External
-		// Kopeio is based on kubenet / external
-		// TODO combine with External
-		tags.Insert("_networking_kubenet", "_networking_external")
-	} else {
-		return nil, fmt.Errorf("no networking mode set")
-	}
-
-	switch cluster.Spec.CloudProvider {
-	case "gce":
+	switch api.CloudProviderID(cluster.Spec.CloudProvider) {
+	case api.CloudProviderGCE:
 		{
 			tags.Insert("_gce")
 		}
 
-	case "aws":
+	case api.CloudProviderAWS:
 		{
 			tags.Insert("_aws")
 		}
-	case "digitalocean":
+	case api.CloudProviderDO:
 		{
 			tags.Insert("_do")
 		}
-	case "vsphere":
+	case api.CloudProviderVSphere:
 		{
 			tags.Insert("_vsphere")
 		}
 
+	case api.CloudProviderBareMetal:
+		// No tags
+
+	case api.CloudProviderOpenstack:
+
+	case api.CloudProviderALI:
+		{
+			tags.Insert("_ali")
+		}
 	default:
 		return nil, fmt.Errorf("unknown CloudProvider %q", cluster.Spec.CloudProvider)
 	}
@@ -103,7 +92,7 @@ func buildCloudupTags(cluster *api.Cluster) (sets.String, error) {
 		tags.Insert(versionTag)
 	}
 
-	glog.V(4).Infof("tags: %s", tags.List())
+	klog.V(4).Infof("tags: %s", tags.List())
 
 	return tags, nil
 }
@@ -117,23 +106,8 @@ func buildNodeupTags(role api.InstanceGroupRole, cluster *api.Cluster, clusterTa
 		return nil, fmt.Errorf("Networking is not set, and should not be nil here")
 	}
 
-	if networking.CNI != nil || networking.Weave != nil || networking.Flannel != nil || networking.Calico != nil || networking.Canal != nil || networking.Kuberouter != nil {
-		// external is based on cni, weave, flannel, calico, etc
-		tags.Insert("_networking_cni")
-	}
-
-	switch role {
-	case api.InstanceGroupRoleNode:
-		// No tags
-
-	case api.InstanceGroupRoleMaster:
-		tags.Insert("_kubernetes_master")
-
-	case api.InstanceGroupRoleBastion:
-		// No tags
-
-	default:
-		return nil, fmt.Errorf("Unrecognized role: %v", role)
+	if networking.LyftVPC != nil {
+		tags.Insert("_lyft_vpc_cni")
 	}
 
 	switch fi.StringValue(cluster.Spec.UpdatePolicy) {
@@ -142,7 +116,7 @@ func buildNodeupTags(role api.InstanceGroupRole, cluster *api.Cluster, clusterTa
 	case api.UpdatePolicyExternal:
 	// Skip applying the tag
 	default:
-		glog.Warningf("Unrecognized value for UpdatePolicy: %v", fi.StringValue(cluster.Spec.UpdatePolicy))
+		klog.Warningf("Unrecognized value for UpdatePolicy: %v", fi.StringValue(cluster.Spec.UpdatePolicy))
 	}
 
 	if clusterTags.Has("_gce") {

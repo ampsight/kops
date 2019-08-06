@@ -19,15 +19,16 @@ package terraform
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/golang/glog"
-	hcl_parser "github.com/hashicorp/hcl/json/parser"
 	"io/ioutil"
-	"k8s.io/kops/pkg/apis/kops"
-	"k8s.io/kops/upup/pkg/fi"
 	"os"
 	"path"
 	"strings"
 	"sync"
+
+	hcl_parser "github.com/hashicorp/hcl/json/parser"
+	"k8s.io/klog"
+	"k8s.io/kops/pkg/apis/kops"
+	"k8s.io/kops/upup/pkg/fi"
 )
 
 type TerraformTarget struct {
@@ -47,17 +48,20 @@ type TerraformTarget struct {
 	outputs map[string]*terraformOutputVariable
 	// files is a map of TF resource files that should be created
 	files map[string][]byte
+	// extra config to add to the provider block
+	clusterSpecTarget *kops.TargetSpec
 }
 
-func NewTerraformTarget(cloud fi.Cloud, region, project string, outDir string) *TerraformTarget {
+func NewTerraformTarget(cloud fi.Cloud, region, project string, outDir string, clusterSpecTarget *kops.TargetSpec) *TerraformTarget {
 	return &TerraformTarget{
 		Cloud:   cloud,
 		Region:  region,
 		Project: project,
 
-		outDir:  outDir,
-		files:   make(map[string][]byte),
-		outputs: make(map[string]*terraformOutputVariable),
+		outDir:            outDir,
+		files:             make(map[string][]byte),
+		outputs:           make(map[string]*terraformOutputVariable),
+		clusterSpecTarget: clusterSpecTarget,
 	}
 }
 
@@ -78,9 +82,7 @@ type terraformOutputVariable struct {
 // A TF name can't have dots in it (if we want to refer to it from a literal),
 // so we replace them
 func tfSanitize(name string) string {
-	name = strings.Replace(name, ".", "-", -1)
-	name = strings.Replace(name, "/", "--", -1)
-	return name
+	return strings.NewReplacer(".", "-", "/", "--", ":", "_").Replace(name)
 }
 
 func (t *TerraformTarget) AddFile(resourceType string, resourceName string, key string, r fi.Resource) (*Literal, error) {
@@ -157,6 +159,16 @@ func (t *TerraformTarget) AddOutputVariableArray(key string, literal *Literal) e
 	return nil
 }
 
+// tfGetProviderExtraConfig is a helper function to get extra config with safety checks on the pointers.
+func tfGetProviderExtraConfig(c *kops.TargetSpec) map[string]string {
+	if c != nil &&
+		c.Terraform != nil &&
+		c.Terraform.ProviderExtraConfig != nil {
+		return *c.Terraform.ProviderExtraConfig
+	}
+	return nil
+}
+
 func (t *TerraformTarget) Finish(taskMap map[string]fi.Task) error {
 	resourcesByType := make(map[string]map[string]interface{})
 
@@ -181,14 +193,23 @@ func (t *TerraformTarget) Finish(taskMap map[string]fi.Task) error {
 		providerGoogle := make(map[string]interface{})
 		providerGoogle["project"] = t.Project
 		providerGoogle["region"] = t.Region
+		for k, v := range tfGetProviderExtraConfig(t.clusterSpecTarget) {
+			providerGoogle[k] = v
+		}
 		providersByName["google"] = providerGoogle
 	} else if t.Cloud.ProviderID() == kops.CloudProviderAWS {
 		providerAWS := make(map[string]interface{})
 		providerAWS["region"] = t.Region
+		for k, v := range tfGetProviderExtraConfig(t.clusterSpecTarget) {
+			providerAWS[k] = v
+		}
 		providersByName["aws"] = providerAWS
 	} else if t.Cloud.ProviderID() == kops.CloudProviderVSphere {
 		providerVSphere := make(map[string]interface{})
 		providerVSphere["region"] = t.Region
+		for k, v := range tfGetProviderExtraConfig(t.clusterSpecTarget) {
+			providerVSphere[k] = v
+		}
 		providersByName["vsphere"] = providerVSphere
 	}
 
@@ -204,14 +225,34 @@ func (t *TerraformTarget) Finish(taskMap map[string]fi.Task) error {
 		if v.Value != nil {
 			tfVar["value"] = v.Value
 		} else {
-			dedup := true
-			sorted, err := sortLiterals(v.ValueArray, dedup)
+			SortLiterals(v.ValueArray)
+			deduped, err := DedupLiterals(v.ValueArray)
 			if err != nil {
-				return fmt.Errorf("error sorting literals: %v", err)
+				return err
 			}
-			tfVar["value"] = sorted
+			tfVar["value"] = deduped
 		}
 		outputVariables[tfName] = tfVar
+	}
+
+	localVariables := make(map[string]interface{})
+	for _, v := range t.outputs {
+		tfName := tfSanitize(v.Key)
+
+		if localVariables[tfName] != nil {
+			return fmt.Errorf("duplicate variable found: %s", tfName)
+		}
+
+		if v.Value != nil {
+			localVariables[tfName] = v.Value
+		} else {
+			SortLiterals(v.ValueArray)
+			deduped, err := DedupLiterals(v.ValueArray)
+			if err != nil {
+				return err
+			}
+			localVariables[tfName] = deduped
+		}
 	}
 
 	// See https://github.com/kubernetes/kops/pull/2424 for why we require 0.9.3
@@ -227,10 +268,13 @@ func (t *TerraformTarget) Finish(taskMap map[string]fi.Task) error {
 	if len(outputVariables) != 0 {
 		data["output"] = outputVariables
 	}
+	if len(localVariables) != 0 {
+		data["locals"] = localVariables
+	}
 
 	jsonBytes, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
-		return fmt.Errorf("error marshalling terraform data to json: %v", err)
+		return fmt.Errorf("error marshaling terraform data to json: %v", err)
 	}
 
 	useJson := false
@@ -249,7 +293,6 @@ func (t *TerraformTarget) Finish(taskMap map[string]fi.Task) error {
 		}
 
 		t.files["kubernetes.tf"] = b
-
 	}
 
 	for relativePath, contents := range t.files {
@@ -266,7 +309,7 @@ func (t *TerraformTarget) Finish(taskMap map[string]fi.Task) error {
 		}
 	}
 
-	glog.Infof("Terraform output is in %s", t.outDir)
+	klog.Infof("Terraform output is in %s", t.outDir)
 
 	return nil
 }

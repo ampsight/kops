@@ -18,11 +18,15 @@ package main
 
 import (
 	"fmt"
-	"k8s.io/kops/channels/pkg/cmd"
 	"os"
+
+	"k8s.io/klog"
+	"k8s.io/kops/channels/pkg/cmd"
 )
 
 func main() {
+	klog.InitFlags(nil)
+
 	f := &cmd.DefaultFactory{}
 	if err := cmd.Execute(f, os.Stdout); err != nil {
 		fmt.Fprintf(os.Stderr, "\n%v\n", err)

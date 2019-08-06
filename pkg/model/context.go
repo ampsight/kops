@@ -23,14 +23,18 @@ import (
 	"net"
 	"strings"
 
-	"github.com/blang/semver"
-	"github.com/golang/glog"
 	"k8s.io/kops/pkg/apis/kops"
+	"k8s.io/kops/pkg/apis/kops/model"
 	"k8s.io/kops/pkg/apis/kops/util"
 	"k8s.io/kops/pkg/featureflag"
 	"k8s.io/kops/pkg/model/components"
+	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awstasks"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
+
+	"github.com/blang/semver"
+	utilnet "k8s.io/apimachinery/pkg/util/net"
+	"k8s.io/klog"
 )
 
 const (
@@ -40,16 +44,15 @@ const (
 
 var UseLegacyELBName = featureflag.New("UseLegacyELBName", featureflag.Bool(false))
 
+// KopsModelContext is the kops model
 type KopsModelContext struct {
-	Cluster *kops.Cluster
-
-	Region         string
+	Cluster        *kops.Cluster
 	InstanceGroups []*kops.InstanceGroup
-
-	SSHPublicKeys [][]byte
+	Region         string
+	SSHPublicKeys  [][]byte
 }
 
-// Will attempt to calculate a meaningful name for an ELB given a prefix
+// GetELBName32 will attempt to calculate a meaningful name for an ELB given a prefix
 // Will never return a string longer than 32 chars
 // Note this is _not_ the primary identifier for the ELB - we use the Name tag for that.
 func (m *KopsModelContext) GetELBName32(prefix string) string {
@@ -61,7 +64,7 @@ func (m *KopsModelContext) GetELBName32(prefix string) string {
 		if len(s) > 32 {
 			s = s[:32]
 		}
-		glog.Infof("UseLegacyELBName feature-flag is set; built legacy name %q", s)
+		klog.Infof("UseLegacyELBName feature-flag is set; built legacy name %q", s)
 		return s
 	}
 
@@ -76,7 +79,7 @@ func (m *KopsModelContext) GetELBName32(prefix string) string {
 	// But we always compute the hash and add it, lest we trick users into assuming that we never do this
 	h := fnv.New32a()
 	if _, err := h.Write([]byte(s)); err != nil {
-		glog.Fatalf("error hashing values: %v", err)
+		klog.Fatalf("error hashing values: %v", err)
 	}
 	hashString := base32.HexEncoding.EncodeToString(h.Sum(nil))
 	hashString = strings.ToLower(hashString)
@@ -93,6 +96,7 @@ func (m *KopsModelContext) GetELBName32(prefix string) string {
 	return s
 }
 
+// ClusterName returns the cluster name
 func (m *KopsModelContext) ClusterName() string {
 	return m.Cluster.ObjectMeta.Name
 }
@@ -100,6 +104,8 @@ func (m *KopsModelContext) ClusterName() string {
 // GatherSubnets maps the subnet names in an InstanceGroup to the ClusterSubnetSpec objects (which are stored on the Cluster)
 func (m *KopsModelContext) GatherSubnets(ig *kops.InstanceGroup) ([]*kops.ClusterSubnetSpec, error) {
 	var subnets []*kops.ClusterSubnetSpec
+	var subnetType kops.SubnetType
+
 	for _, subnetName := range ig.Spec.Subnets {
 		var matches []*kops.ClusterSubnetSpec
 		for i := range m.Cluster.Spec.Subnets {
@@ -115,7 +121,18 @@ func (m *KopsModelContext) GatherSubnets(ig *kops.InstanceGroup) ([]*kops.Cluste
 			return nil, fmt.Errorf("found multiple subnets with name: %q", subnetName)
 		}
 		subnets = append(subnets, matches[0])
+
+		// @step: check the instance is not cross subnet types
+		switch subnetType {
+		case "":
+			subnetType = matches[0].Type
+		default:
+			if matches[0].Type != subnetType {
+				return nil, fmt.Errorf("found subnets of different types: %v", strings.Join([]string{string(subnetType), string(matches[0].Type)}, ","))
+			}
+		}
 	}
+
 	return subnets, nil
 }
 
@@ -131,13 +148,12 @@ func (m *KopsModelContext) FindInstanceGroup(name string) *kops.InstanceGroup {
 
 // FindSubnet returns the subnet with the matching Name (or nil if not found)
 func (m *KopsModelContext) FindSubnet(name string) *kops.ClusterSubnetSpec {
-	for i := range m.Cluster.Spec.Subnets {
-		s := &m.Cluster.Spec.Subnets[i]
-		if s.Name == name {
-			return s
-		}
-	}
-	return nil
+	return model.FindSubnet(m.Cluster, name)
+}
+
+// FindZonesForInstanceGroup finds the zones for an InstanceGroup
+func (m *KopsModelContext) FindZonesForInstanceGroup(ig *kops.InstanceGroup) ([]string, error) {
+	return model.FindZonesForInstanceGroup(m.Cluster, ig)
 }
 
 // MasterInstanceGroups returns InstanceGroups with the master role
@@ -214,9 +230,27 @@ func (m *KopsModelContext) CloudTags(name string, shared bool) map[string]string
 
 	switch kops.CloudProviderID(m.Cluster.Spec.CloudProvider) {
 	case kops.CloudProviderAWS:
-		tags[awsup.TagClusterName] = m.Cluster.ObjectMeta.Name
-		if name != "" {
-			tags["Name"] = name
+		if shared {
+			// If the resource is shared, we don't try to set the Name - we presume that is managed externally
+			klog.V(4).Infof("Skipping Name tag for shared resource")
+		} else {
+			if name != "" {
+				tags["Name"] = name
+			}
+		}
+
+		// Kubernetes 1.6 introduced the shared ownership tag; that replaces TagClusterName
+		setLegacyTag := true
+		if m.IsKubernetesGTE("1.6") {
+			// For the moment, we only skip the legacy tag for shared resources
+			// (other people may be using it)
+			if shared {
+				klog.V(4).Infof("Skipping %q tag for shared resource", awsup.TagClusterName)
+				setLegacyTag = false
+			}
+		}
+		if setLegacyTag {
+			tags[awsup.TagClusterName] = m.Cluster.ObjectMeta.Name
 		}
 
 		if shared {
@@ -229,6 +263,16 @@ func (m *KopsModelContext) CloudTags(name string, shared bool) map[string]string
 	return tags
 }
 
+// UseBootstrapTokens checks if bootstrap tokens are enabled
+func (m *KopsModelContext) UseBootstrapTokens() bool {
+	if m.Cluster.Spec.KubeAPIServer == nil {
+		return false
+	}
+
+	return fi.BoolValue(m.Cluster.Spec.KubeAPIServer.EnableBootstrapAuthToken)
+}
+
+// UsesBastionDns checks if we should use a specific name for the bastion dns
 func (m *KopsModelContext) UsesBastionDns() bool {
 	if m.Cluster.Spec.Topology.Bastion != nil && m.Cluster.Spec.Topology.Bastion.BastionPublicName != "" {
 		return true
@@ -236,6 +280,7 @@ func (m *KopsModelContext) UsesBastionDns() bool {
 	return false
 }
 
+// UsesSSHBastion checks if we have a Bastion in the cluster
 func (m *KopsModelContext) UsesSSHBastion() bool {
 	for _, ig := range m.InstanceGroups {
 		if ig.Spec.Role == kops.InstanceGroupRoleBastion {
@@ -246,6 +291,7 @@ func (m *KopsModelContext) UsesSSHBastion() bool {
 	return false
 }
 
+// UseLoadBalancerForAPI checks if we are using a load balancer for the kubeapi
 func (m *KopsModelContext) UseLoadBalancerForAPI() bool {
 	if m.Cluster.Spec.API == nil {
 		return false
@@ -253,6 +299,15 @@ func (m *KopsModelContext) UseLoadBalancerForAPI() bool {
 	return m.Cluster.Spec.API.LoadBalancer != nil
 }
 
+// UseLoadBalancerForInternalAPI check if true then we will use the created loadbalancer for internal kubelet
+// connections.  The intention here is to make connections to apiserver more
+// HA - see https://github.com/kubernetes/kops/issues/4252
+func (m *KopsModelContext) UseLoadBalancerForInternalAPI() bool {
+	return m.UseLoadBalancerForAPI() &&
+		m.Cluster.Spec.API.LoadBalancer.UseForInternalApi == true
+}
+
+// UsePrivateDNS checks if we are using private DNS
 func (m *KopsModelContext) UsePrivateDNS() bool {
 	topology := m.Cluster.Spec.Topology
 	if topology != nil && topology.DNS != nil {
@@ -263,7 +318,7 @@ func (m *KopsModelContext) UsePrivateDNS() bool {
 			return true
 
 		default:
-			glog.Warningf("Unknown DNS type %q", topology.DNS.Type)
+			klog.Warningf("Unknown DNS type %q", topology.DNS.Type)
 			return false
 		}
 	}
@@ -271,9 +326,20 @@ func (m *KopsModelContext) UsePrivateDNS() bool {
 	return false
 }
 
-// UseEtcdTLS checks to see if etcd tls is enabled
-func (c *KopsModelContext) UseEtcdTLS() bool {
+// UseEtcdManager checks to see if etcd manager is enabled
+func (c *KopsModelContext) UseEtcdManager() bool {
 	for _, x := range c.Cluster.Spec.EtcdClusters {
+		if x.Provider == kops.EtcdProviderTypeManager {
+			return true
+		}
+	}
+
+	return false
+}
+
+// UseEtcdTLS checks to see if etcd tls is enabled
+func (m *KopsModelContext) UseEtcdTLS() bool {
+	for _, x := range m.Cluster.Spec.EtcdClusters {
 		if x.EnableEtcdTLS {
 			return true
 		}
@@ -283,34 +349,45 @@ func (c *KopsModelContext) UseEtcdTLS() bool {
 }
 
 // KubernetesVersion parses the semver version of kubernetes, from the cluster spec
-func (c *KopsModelContext) KubernetesVersion() (semver.Version, error) {
+func (m *KopsModelContext) KubernetesVersion() semver.Version {
 	// TODO: Remove copy-pasting c.f. https://github.com/kubernetes/kops/blob/master/pkg/model/components/context.go#L32
 
-	kubernetesVersion := c.Cluster.Spec.KubernetesVersion
+	kubernetesVersion := m.Cluster.Spec.KubernetesVersion
 
 	if kubernetesVersion == "" {
-		return semver.Version{}, fmt.Errorf("KubernetesVersion is required")
+		klog.Fatalf("KubernetesVersion is required")
 	}
 
 	sv, err := util.ParseKubernetesVersion(kubernetesVersion)
 	if err != nil {
-		return semver.Version{}, fmt.Errorf("unable to determine kubernetes version from %q", kubernetesVersion)
+		klog.Fatalf("unable to determine kubernetes version from %q", kubernetesVersion)
 	}
 
-	return *sv, nil
+	return *sv
 }
 
-// VersionGTE is a simplified semver comparison
-func VersionGTE(version semver.Version, major uint64, minor uint64) bool {
-	if version.Major > major {
-		return true
-	}
-	if version.Major == major && version.Minor >= minor {
-		return true
-	}
-	return false
+// IsKubernetesGTE checks if the kubernetes version is at least version, ignoring prereleases / patches
+func (m *KopsModelContext) IsKubernetesGTE(version string) bool {
+	return util.IsKubernetesGTE(version, m.KubernetesVersion())
 }
 
-func (c *KopsModelContext) WellKnownServiceIP(id int) (net.IP, error) {
-	return components.WellKnownServiceIP(&c.Cluster.Spec, id)
+// WellKnownServiceIP returns a service ip with the service cidr
+func (m *KopsModelContext) WellKnownServiceIP(id int) (net.IP, error) {
+	return components.WellKnownServiceIP(&m.Cluster.Spec, id)
+}
+
+// NodePortRange returns the range of ports allocated to NodePorts
+func (m *KopsModelContext) NodePortRange() (utilnet.PortRange, error) {
+	// defaultServiceNodePortRange is the default port range for NodePort services.
+	defaultServiceNodePortRange := utilnet.PortRange{Base: 30000, Size: 2768}
+
+	kubeApiServer := m.Cluster.Spec.KubeAPIServer
+	if kubeApiServer != nil && kubeApiServer.ServiceNodePortRange != "" {
+		err := defaultServiceNodePortRange.Set(kubeApiServer.ServiceNodePortRange)
+		if err != nil {
+			return utilnet.PortRange{}, fmt.Errorf("error parsing ServiceNodePortRange %q", kubeApiServer.ServiceNodePortRange)
+		}
+	}
+
+	return defaultServiceNodePortRange, nil
 }

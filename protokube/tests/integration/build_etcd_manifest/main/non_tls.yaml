@@ -2,8 +2,9 @@ clientPort: 4001
 clusterName: etcd-main
 clusterToken: token-main
 cpuRequest: "200m"
+memoryRequest: "100Mi"
 dataDirName: data-main
-imageSource: gcr.io/google_containers/etcd:2.2.1
+imageSource: k8s.gcr.io/etcd:2.2.1
 logFile: /var/log/etcd.log
 peerPort: 2380
 podName: etcd-server-main
@@ -23,6 +24,8 @@ spec: {}
 apiVersion: v1
 kind: Pod
 metadata:
+  annotations:
+    scheduler.alpha.kubernetes.io/critical-pod: ""
   creationTimestamp: null
   labels:
     k8s-app: etcd-server-main
@@ -33,7 +36,8 @@ spec:
   - command:
     - /bin/sh
     - -c
-    - /usr/local/bin/etcd 2>&1 | /bin/tee /var/log/etcd.log
+    - mkfifo /tmp/pipe; (tee -a /var/log/etcd.log < /tmp/pipe & ) ; exec /usr/local/bin/etcd  >
+      /tmp/pipe 2>&1
     env:
     - name: ETCD_NAME
       value: node0
@@ -53,7 +57,7 @@ spec:
       value: token-main
     - name: ETCD_INITIAL_CLUSTER
       value: node0=http://node0.internal:2380,node1=http://node1.internal:2380,node2=http://node2.internal:2380
-    image: gcr.io/google_containers/etcd:2.2.1
+    image: k8s.gcr.io/etcd:2.2.1
     livenessProbe:
       httpGet:
         host: 127.0.0.1
@@ -73,12 +77,20 @@ spec:
     resources:
       requests:
         cpu: 200m
+        memory: 100Mi
     volumeMounts:
     - mountPath: /var/etcd/data-main
       name: varetcdata
     - mountPath: /var/log/etcd.log
       name: varlogetcd
+    - mountPath: /etc/hosts
+      name: hosts
+      readOnly: true
   hostNetwork: true
+  priorityClassName: system-cluster-critical
+  tolerations:
+  - key: CriticalAddonsOnly
+    operator: Exists
   volumes:
   - hostPath:
       path: /mnt/main/var/etcd/data-main
@@ -86,4 +98,7 @@ spec:
   - hostPath:
       path: /var/log/etcd.log
     name: varlogetcd
+  - hostPath:
+      path: /etc/hosts
+    name: hosts
 status: {}

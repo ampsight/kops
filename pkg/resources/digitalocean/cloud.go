@@ -18,15 +18,19 @@ package digitalocean
 
 import (
 	"errors"
+	"fmt"
 	"os"
 
 	"github.com/digitalocean/godo"
 	"golang.org/x/oauth2"
+	"k8s.io/klog"
 
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/kops/dnsprovider/pkg/dnsprovider"
 	"k8s.io/kops/pkg/apis/kops"
+	"k8s.io/kops/pkg/cloudinstances"
 	"k8s.io/kops/pkg/resources/digitalocean/dns"
 	"k8s.io/kops/upup/pkg/fi"
-	"k8s.io/kubernetes/federation/pkg/dnsprovider"
 )
 
 // TokenSource implements oauth2.TokenSource
@@ -54,12 +58,12 @@ type Cloud struct {
 
 var _ fi.Cloud = &Cloud{}
 
-// NewCloud returns a Cloud, expecting the env var DO_ACCESS_TOKEN
-// NewCloud will return an err if DO_ACCESS_TOKEN is not defined
+// NewCloud returns a Cloud, expecting the env var DIGITALOCEAN_ACCESS_TOKEN
+// NewCloud will return an err if DIGITALOCEAN_ACCESS_TOKEN is not defined
 func NewCloud(region string) (*Cloud, error) {
-	accessToken := os.Getenv("DO_ACCESS_TOKEN")
+	accessToken := os.Getenv("DIGITALOCEAN_ACCESS_TOKEN")
 	if accessToken == "" {
-		return nil, errors.New("DO_ACCESS_TOKEN is required")
+		return nil, errors.New("DIGITALOCEAN_ACCESS_TOKEN is required")
 	}
 
 	tokenSource := &TokenSource{
@@ -76,6 +80,24 @@ func NewCloud(region string) (*Cloud, error) {
 	}, nil
 }
 
+// GetCloudGroups is not implemented yet, that needs to return the instances and groups that back a kops cluster.
+func (c *Cloud) GetCloudGroups(cluster *kops.Cluster, instancegroups []*kops.InstanceGroup, warnUnmatched bool, nodes []v1.Node) (map[string]*cloudinstances.CloudInstanceGroup, error) {
+	klog.V(8).Info("digitalocean cloud provider GetCloudGroups not implemented yet")
+	return nil, fmt.Errorf("digital ocean cloud provider does not support getting cloud groups at this time")
+}
+
+// DeleteGroup is not implemented yet, is a func that needs to delete a DO instance group.
+func (c *Cloud) DeleteGroup(g *cloudinstances.CloudInstanceGroup) error {
+	klog.V(8).Info("digitalocean cloud provider DeleteGroup not implemented yet")
+	return fmt.Errorf("digital ocean cloud provider does not support deleting cloud groups at this time")
+}
+
+// DeleteInstance is not implemented yet, is func needs to delete a DO instance.
+func (c *Cloud) DeleteInstance(i *cloudinstances.CloudInstanceGroupMember) error {
+	klog.V(8).Info("digitalocean cloud provider DeleteInstance not implemented yet")
+	return fmt.Errorf("digital ocean cloud provider does not support deleting cloud instances at this time")
+}
+
 // ProviderID returns the kops api identifier for DigitalOcean cloud provider
 func (c *Cloud) ProviderID() kops.CloudProviderID {
 	return kops.CloudProviderDO
@@ -86,9 +108,18 @@ func (c *Cloud) DNS() (dnsprovider.Interface, error) {
 	return c.dns, nil
 }
 
-// Volume returns an implementation of godo.StorageService
+// Volumes returns an implementation of godo.StorageService
 func (c *Cloud) Volumes() godo.StorageService {
 	return c.Client.Storage
+}
+
+// VolumeActions returns an implementation of godo.StorageActionsService
+func (c *Cloud) VolumeActions() godo.StorageActionsService {
+	return c.Client.StorageActions
+}
+
+func (c *Cloud) Droplets() godo.DropletsService {
+	return c.Client.Droplets
 }
 
 // FindVPCInfo is not implemented, it's only here to satisfy the fi.Cloud interface

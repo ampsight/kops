@@ -21,12 +21,16 @@ import (
 	"path/filepath"
 	"strings"
 
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/client-go/pkg/api/v1"
+	"k8s.io/kops/pkg/kubemanifest"
+	"k8s.io/kops/util/pkg/exec"
 )
 
 // BuildEtcdManifest creates the pod spec, based on the etcd cluster
 func BuildEtcdManifest(c *EtcdCluster) *v1.Pod {
+
 	pod := &v1.Pod{}
 	pod.APIVersion = "v1"
 	pod.Kind = "Pod"
@@ -34,18 +38,33 @@ func BuildEtcdManifest(c *EtcdCluster) *v1.Pod {
 	pod.Namespace = "kube-system"
 	pod.Labels = map[string]string{"k8s-app": c.PodName}
 	pod.Spec.HostNetwork = true
+
+	// dereference our resource requests if they exist
+	// cpu
+	var cpuRequest resource.Quantity
+	if c.CPURequest != nil {
+		cpuRequest = *c.CPURequest
+	}
+
+	// memory
+	var memoryRequest resource.Quantity
+	if c.MemoryRequest != nil {
+		memoryRequest = *c.MemoryRequest
+	}
+
 	{
 		container := v1.Container{
 			Name:  "etcd-container",
 			Image: c.ImageSource,
 			Resources: v1.ResourceRequirements{
 				Requests: v1.ResourceList{
-					v1.ResourceCPU: c.CPURequest,
+					v1.ResourceCPU:    cpuRequest,
+					v1.ResourceMemory: memoryRequest,
 				},
 			},
-			Command: []string{"/bin/sh", "-c", "/usr/local/bin/etcd 2>&1 | /bin/tee /var/log/etcd.log"},
+			Command: exec.WithTee("/usr/local/bin/etcd", []string{}, "/var/log/etcd.log"),
 		}
-		// build the the environment variables for etcd service
+		// build the environment variables for etcd service
 		container.Env = buildEtcdEnvironmentOptions(c)
 
 		container.LivenessProbe = &v1.Probe{
@@ -86,6 +105,11 @@ func BuildEtcdManifest(c *EtcdCluster) *v1.Pod {
 			MountPath: "/var/log/etcd.log",
 			ReadOnly:  false,
 		})
+		container.VolumeMounts = append(container.VolumeMounts, v1.VolumeMount{
+			Name:      "hosts",
+			MountPath: "/etc/hosts",
+			ReadOnly:  true,
+		})
 		// add the host path mount to the pod spec
 		pod.Spec.Volumes = append(pod.Spec.Volumes, v1.Volume{
 			Name: "varetcdata",
@@ -103,7 +127,14 @@ func BuildEtcdManifest(c *EtcdCluster) *v1.Pod {
 				},
 			},
 		})
-
+		pod.Spec.Volumes = append(pod.Spec.Volumes, v1.Volume{
+			Name: "hosts",
+			VolumeSource: v1.VolumeSource{
+				HostPath: &v1.HostPathVolumeSource{
+					Path: "/etc/hosts",
+				},
+			},
+		})
 		// @check if tls is enabled and mount the directory. It might be worth considering
 		// if we you use our own directory in /srv i.e /srv/etcd rather than the default /src/kubernetes
 		if c.isTLS() {
@@ -128,10 +159,18 @@ func BuildEtcdManifest(c *EtcdCluster) *v1.Pod {
 		pod.Spec.Containers = append(pod.Spec.Containers, container)
 	}
 
+	if c.BackupStore != "" && c.BackupImage != "" {
+		backupContainer := buildEtcdBackupManagerContainer(c)
+		pod.Spec.Containers = append(pod.Spec.Containers, *backupContainer)
+	}
+
+	kubemanifest.MarkPodAsCritical(pod)
+	kubemanifest.MarkPodAsClusterCritical(pod)
+
 	return pod
 }
 
-// buildEtcdEnvironmentOptions is responsible for building the environment variabled for etcd
+// buildEtcdEnvironmentOptions is responsible for building the environment variables for etcd
 // @question should we perhaps make this version specific in prep for v3 support?
 func buildEtcdEnvironmentOptions(c *EtcdCluster) []v1.EnvVar {
 	var options []v1.EnvVar
@@ -153,6 +192,14 @@ func buildEtcdEnvironmentOptions(c *EtcdCluster) []v1.EnvVar {
 		{Name: "ETCD_INITIAL_CLUSTER_STATE", Value: "new"},
 		{Name: "ETCD_INITIAL_CLUSTER_TOKEN", Value: c.ClusterToken}}...)
 
+	// add timeout/hearbeat settings
+	if notEmpty(c.ElectionTimeout) {
+		options = append(options, v1.EnvVar{Name: "ETCD_ELECTION_TIMEOUT", Value: c.ElectionTimeout})
+	}
+	if notEmpty(c.HeartbeatInterval) {
+		options = append(options, v1.EnvVar{Name: "ETCD_HEARTBEAT_INTERVAL", Value: c.HeartbeatInterval})
+	}
+
 	// @check if we are using peer certificates
 	if notEmpty(c.PeerCA) {
 		options = append(options, []v1.EnvVar{
@@ -172,6 +219,12 @@ func buildEtcdEnvironmentOptions(c *EtcdCluster) []v1.EnvVar {
 	}
 	if notEmpty(c.TLSKey) {
 		options = append(options, v1.EnvVar{Name: "ETCD_KEY_FILE", Value: c.TLSKey})
+	}
+	if c.isTLS() {
+		if c.TLSAuth {
+			options = append(options, v1.EnvVar{Name: "ETCD_CLIENT_CERT_AUTH", Value: "true"})
+			options = append(options, v1.EnvVar{Name: "ETCD_PEER_CLIENT_CERT_AUTH", Value: "true"})
+		}
 	}
 
 	// @step: generate the initial cluster
@@ -208,4 +261,50 @@ func buildCertificateDirectories(c *EtcdCluster) []string {
 // notEmpty is just a code pretty version if string != ""
 func notEmpty(v string) bool {
 	return v != ""
+}
+
+// buildEtcdBackupManagerContainer builds a container for the standalone etcd backup manager
+func buildEtcdBackupManagerContainer(c *EtcdCluster) *v1.Container {
+	command := []string{"/etcd-backup"}
+	command = append(command, "--backup-store", c.BackupStore)
+	command = append(command, "--cluster-name", c.ClusterName)
+	command = append(command, "--data-dir", "/var/etcd/"+c.DataDirName)
+
+	if c.isTLS() {
+		command = append(command, "--client-url", "https://127.0.0.1:4001")
+		command = append(command, "--client-ca-file", c.TLSCA)
+		command = append(command, "--client-cert-file", c.TLSCert)
+		command = append(command, "--client-key-file", c.TLSKey)
+	}
+
+	container := v1.Container{
+		Name:    "etcd-backup",
+		Image:   c.BackupImage,
+		Command: command,
+	}
+
+	// TODO: TLS options
+	// TODO: Liveness probe?
+
+	// volume should already have been registered
+	container.VolumeMounts = append(container.VolumeMounts, v1.VolumeMount{
+		Name:      "varetcdata",
+		MountPath: "/var/etcd/" + c.DataDirName,
+		ReadOnly:  false,
+	})
+
+	if c.isTLS() {
+		for _, dirname := range buildCertificateDirectories(c) {
+			normalized := strings.Replace(dirname, "/", "", -1)
+
+			// pod volume already registered for etcd container above
+			container.VolumeMounts = append(container.VolumeMounts, v1.VolumeMount{
+				Name:      normalized,
+				MountPath: dirname,
+				ReadOnly:  true,
+			})
+		}
+	}
+
+	return &container
 }

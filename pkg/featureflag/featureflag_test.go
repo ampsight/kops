@@ -17,9 +17,10 @@ limitations under the License.
 package featureflag
 
 import (
-	"github.com/golang/glog"
 	"os"
 	"testing"
+
+	"k8s.io/klog"
 )
 
 func TestFlagToFalse(t *testing.T) {
@@ -29,7 +30,7 @@ func TestFlagToFalse(t *testing.T) {
 	}
 
 	// Really just to force a dependency on glog, so that we can pass -v and -logtostderr to go test
-	glog.Infof("Created flag Unittest1")
+	klog.Info("Created flag Unittest1")
 
 	ParseFlags("-UnitTest1")
 	if f.Enabled() {

@@ -19,12 +19,14 @@ package awstasks
 import (
 	"fmt"
 
-	"github.com/aws/aws-sdk-go/service/ec2"
-	"github.com/golang/glog"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
 	"k8s.io/kops/upup/pkg/fi/cloudup/cloudformation"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraform"
+
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/service/ec2"
+	"k8s.io/klog"
 )
 
 //go:generate fitask -type=EBSVolume
@@ -32,13 +34,14 @@ type EBSVolume struct {
 	Name      *string
 	Lifecycle *fi.Lifecycle
 
-	ID               *string
 	AvailabilityZone *string
-	VolumeType       *string
-	SizeGB           *int64
-	KmsKeyId         *string
 	Encrypted        *bool
+	ID               *string
+	KmsKeyId         *string
+	SizeGB           *int64
 	Tags             map[string]string
+	VolumeIops       *int64
+	VolumeType       *string
 }
 
 var _ fi.CompareWithID = &EBSVolume{}
@@ -61,6 +64,7 @@ func (e *EBSVolume) FindResourceID(c fi.Cloud) (*string, error) {
 	if actual == nil {
 		return nil, nil
 	}
+
 	return actual.ID, nil
 }
 
@@ -69,6 +73,7 @@ func (e *EBSVolume) Find(context *fi.Context) (*EBSVolume, error) {
 	if actual != nil && err == nil {
 		e.ID = actual.ID
 	}
+
 	return actual, err
 }
 
@@ -90,7 +95,7 @@ func (e *EBSVolume) find(cloud awsup.AWSCloud) (*EBSVolume, error) {
 	if len(response.Volumes) != 1 {
 		return nil, fmt.Errorf("found multiple Volumes with name: %s", *e.Name)
 	}
-	glog.V(2).Info("found existing volume")
+	klog.V(2).Info("found existing volume")
 	v := response.Volumes[0]
 	actual := &EBSVolume{
 		ID:               v.VolumeId,
@@ -100,6 +105,7 @@ func (e *EBSVolume) find(cloud awsup.AWSCloud) (*EBSVolume, error) {
 		KmsKeyId:         v.KmsKeyId,
 		Encrypted:        v.Encrypted,
 		Name:             e.Name,
+		VolumeIops:       v.Iops,
 	}
 
 	actual.Tags = mapEC2TagsToMap(v.Tags)
@@ -131,7 +137,7 @@ func (_ *EBSVolume) CheckChanges(a, e, changes *EBSVolume) error {
 
 func (_ *EBSVolume) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *EBSVolume) error {
 	if a == nil {
-		glog.V(2).Infof("Creating PersistentVolume with Name:%q", *e.Name)
+		klog.V(2).Infof("Creating PersistentVolume with Name:%q", *e.Name)
 
 		request := &ec2.CreateVolumeInput{
 			Size:             e.SizeGB,
@@ -139,6 +145,20 @@ func (_ *EBSVolume) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *EBSVolume) e
 			VolumeType:       e.VolumeType,
 			KmsKeyId:         e.KmsKeyId,
 			Encrypted:        e.Encrypted,
+			Iops:             e.VolumeIops,
+		}
+
+		if len(e.Tags) != 0 {
+			request.TagSpecifications = []*ec2.TagSpecification{
+				{ResourceType: aws.String(ec2.ResourceTypeVolume)},
+			}
+
+			for k, v := range e.Tags {
+				request.TagSpecifications[0].Tags = append(request.TagSpecifications[0].Tags, &ec2.Tag{
+					Key:   aws.String(k),
+					Value: aws.String(v),
+				})
+			}
 		}
 
 		response, err := t.Cloud.EC2().CreateVolume(request)
@@ -180,6 +200,7 @@ type terraformVolume struct {
 	AvailabilityZone *string           `json:"availability_zone,omitempty"`
 	Size             *int64            `json:"size,omitempty"`
 	Type             *string           `json:"type,omitempty"`
+	Iops             *int64            `json:"iops,omitempty"`
 	KmsKeyId         *string           `json:"kms_key_id,omitempty"`
 	Encrypted        *bool             `json:"encrypted,omitempty"`
 	Tags             map[string]string `json:"tags,omitempty"`
@@ -190,6 +211,7 @@ func (_ *EBSVolume) RenderTerraform(t *terraform.TerraformTarget, a, e, changes 
 		AvailabilityZone: e.AvailabilityZone,
 		Size:             e.SizeGB,
 		Type:             e.VolumeType,
+		Iops:             e.VolumeIops,
 		KmsKeyId:         e.KmsKeyId,
 		Encrypted:        e.Encrypted,
 		Tags:             e.Tags,
@@ -206,6 +228,7 @@ type cloudformationVolume struct {
 	AvailabilityZone *string             `json:"AvailabilityZone,omitempty"`
 	Size             *int64              `json:"Size,omitempty"`
 	Type             *string             `json:"VolumeType,omitempty"`
+	Iops             *int64              `json:"Iops,omitempty"`
 	KmsKeyId         *string             `json:"KmsKeyId,omitempty"`
 	Encrypted        *bool               `json:"Encrypted,omitempty"`
 	Tags             []cloudformationTag `json:"Tags,omitempty"`
@@ -216,6 +239,7 @@ func (_ *EBSVolume) RenderCloudformation(t *cloudformation.CloudformationTarget,
 		AvailabilityZone: e.AvailabilityZone,
 		Size:             e.SizeGB,
 		Type:             e.VolumeType,
+		Iops:             e.VolumeIops,
 		KmsKeyId:         e.KmsKeyId,
 		Encrypted:        e.Encrypted,
 		Tags:             buildCloudformationTags(e.Tags),

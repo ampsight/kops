@@ -17,8 +17,10 @@ limitations under the License.
 package fi
 
 import (
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/kops/dnsprovider/pkg/dnsprovider"
 	"k8s.io/kops/pkg/apis/kops"
-	"k8s.io/kubernetes/federation/pkg/dnsprovider"
+	"k8s.io/kops/pkg/cloudinstances"
 )
 
 type Cloud interface {
@@ -28,6 +30,15 @@ type Cloud interface {
 
 	// FindVPCInfo looks up the specified VPC by id, returning info if found, otherwise (nil, nil)
 	FindVPCInfo(id string) (*VPCInfo, error)
+
+	// DeleteInstance deletes a cloud instance
+	DeleteInstance(instance *cloudinstances.CloudInstanceGroupMember) error
+
+	// DeleteGroup deletes the cloud resources that make up a CloudInstanceGroup, including the instances
+	DeleteGroup(group *cloudinstances.CloudInstanceGroup) error
+
+	// GetCloudGroups returns a map of cloud instances that back a kops cluster
+	GetCloudGroups(cluster *kops.Cluster, instancegroups []*kops.InstanceGroup, warnUnmatched bool, nodes []v1.Node) (map[string]*cloudinstances.CloudInstanceGroup, error)
 }
 
 type VPCInfo struct {
@@ -52,35 +63,49 @@ var zonesToCloud = map[string]kops.CloudProviderID{
 	"us-east-1c": kops.CloudProviderAWS,
 	"us-east-1d": kops.CloudProviderAWS,
 	"us-east-1e": kops.CloudProviderAWS,
+	"us-east-1f": kops.CloudProviderAWS,
 
 	"us-east-2a": kops.CloudProviderAWS,
 	"us-east-2b": kops.CloudProviderAWS,
 	"us-east-2c": kops.CloudProviderAWS,
 	"us-east-2d": kops.CloudProviderAWS,
 	"us-east-2e": kops.CloudProviderAWS,
+	"us-east-2f": kops.CloudProviderAWS,
 
 	"us-west-1a": kops.CloudProviderAWS,
 	"us-west-1b": kops.CloudProviderAWS,
 	"us-west-1c": kops.CloudProviderAWS,
 	"us-west-1d": kops.CloudProviderAWS,
 	"us-west-1e": kops.CloudProviderAWS,
+	"us-west-1f": kops.CloudProviderAWS,
 
 	"us-west-2a": kops.CloudProviderAWS,
 	"us-west-2b": kops.CloudProviderAWS,
 	"us-west-2c": kops.CloudProviderAWS,
 	"us-west-2d": kops.CloudProviderAWS,
 	"us-west-2e": kops.CloudProviderAWS,
+	"us-west-2f": kops.CloudProviderAWS,
 
 	"ca-central-1a": kops.CloudProviderAWS,
 	"ca-central-1b": kops.CloudProviderAWS,
+
+	"eu-north-1a": kops.CloudProviderAWS,
+	"eu-north-1b": kops.CloudProviderAWS,
+	"eu-north-1c": kops.CloudProviderAWS,
 
 	"eu-west-1a": kops.CloudProviderAWS,
 	"eu-west-1b": kops.CloudProviderAWS,
 	"eu-west-1c": kops.CloudProviderAWS,
 	"eu-west-1d": kops.CloudProviderAWS,
 	"eu-west-1e": kops.CloudProviderAWS,
+
 	"eu-west-2a": kops.CloudProviderAWS,
 	"eu-west-2b": kops.CloudProviderAWS,
+	"eu-west-2c": kops.CloudProviderAWS,
+
+	"eu-west-3a": kops.CloudProviderAWS,
+	"eu-west-3b": kops.CloudProviderAWS,
+	"eu-west-3c": kops.CloudProviderAWS,
 
 	"eu-central-1a": kops.CloudProviderAWS,
 	"eu-central-1b": kops.CloudProviderAWS,
@@ -118,6 +143,12 @@ var zonesToCloud = map[string]kops.CloudProviderID{
 	"ap-northeast-2d": kops.CloudProviderAWS,
 	"ap-northeast-2e": kops.CloudProviderAWS,
 
+	"ap-east-1a": kops.CloudProviderAWS,
+	"ap-east-1b": kops.CloudProviderAWS,
+	"ap-east-1c": kops.CloudProviderAWS,
+	"ap-east-1d": kops.CloudProviderAWS,
+	"ap-east-1e": kops.CloudProviderAWS,
+
 	"sa-east-1a": kops.CloudProviderAWS,
 	"sa-east-1b": kops.CloudProviderAWS,
 	"sa-east-1c": kops.CloudProviderAWS,
@@ -126,6 +157,10 @@ var zonesToCloud = map[string]kops.CloudProviderID{
 
 	"cn-north-1a": kops.CloudProviderAWS,
 	"cn-north-1b": kops.CloudProviderAWS,
+
+	"cn-northwest-1a": kops.CloudProviderAWS,
+	"cn-northwest-1b": kops.CloudProviderAWS,
+	"cn-northwest-1c": kops.CloudProviderAWS,
 
 	"us-gov-west-1a": kops.CloudProviderAWS,
 	"us-gov-west-1b": kops.CloudProviderAWS,
@@ -141,11 +176,38 @@ var zonesToCloud = map[string]kops.CloudProviderID{
 	"asia-northeast1-c": kops.CloudProviderGCE,
 	"asia-northeast1-d": kops.CloudProviderGCE,
 
+	"asia-south1-a": kops.CloudProviderGCE,
+	"asia-south1-b": kops.CloudProviderGCE,
+	"asia-south1-c": kops.CloudProviderGCE,
+
+	"asia-southeast1-a": kops.CloudProviderGCE,
+	"asia-southeast1-b": kops.CloudProviderGCE,
+
+	"australia-southeast1-a": kops.CloudProviderGCE,
+	"australia-southeast1-b": kops.CloudProviderGCE,
+	"australia-southeast1-c": kops.CloudProviderGCE,
+
+	"europe-north1-a": kops.CloudProviderGCE,
+	"europe-north1-b": kops.CloudProviderGCE,
+	"europe-north1-c": kops.CloudProviderGCE,
+
 	"europe-west1-a": kops.CloudProviderGCE,
 	"europe-west1-b": kops.CloudProviderGCE,
 	"europe-west1-c": kops.CloudProviderGCE,
 	"europe-west1-d": kops.CloudProviderGCE,
 	"europe-west1-e": kops.CloudProviderGCE,
+
+	"europe-west2-a": kops.CloudProviderGCE,
+	"europe-west2-b": kops.CloudProviderGCE,
+	"europe-west2-c": kops.CloudProviderGCE,
+
+	"europe-west3-a": kops.CloudProviderGCE,
+	"europe-west3-b": kops.CloudProviderGCE,
+	"europe-west3-c": kops.CloudProviderGCE,
+
+	"europe-west4-a": kops.CloudProviderGCE,
+	"europe-west4-b": kops.CloudProviderGCE,
+	"europe-west4-c": kops.CloudProviderGCE,
 
 	"us-central1-a": kops.CloudProviderGCE,
 	"us-central1-b": kops.CloudProviderGCE,
@@ -161,10 +223,22 @@ var zonesToCloud = map[string]kops.CloudProviderID{
 	"us-east1-c": kops.CloudProviderGCE,
 	"us-east1-d": kops.CloudProviderGCE,
 
+	"us-east4-a": kops.CloudProviderGCE,
+	"us-east4-b": kops.CloudProviderGCE,
+	"us-east4-c": kops.CloudProviderGCE,
+
 	"us-west1-a": kops.CloudProviderGCE,
 	"us-west1-b": kops.CloudProviderGCE,
 	"us-west1-c": kops.CloudProviderGCE,
 	"us-west1-d": kops.CloudProviderGCE,
+
+	"northamerica-northeast1-a": kops.CloudProviderGCE,
+	"northamerica-northeast1-b": kops.CloudProviderGCE,
+	"northamerica-northeast1-c": kops.CloudProviderGCE,
+
+	"southamerica-east1-a": kops.CloudProviderGCE,
+	"southamerica-east1-b": kops.CloudProviderGCE,
+	"southamerica-east1-c": kops.CloudProviderGCE,
 
 	"nyc1": kops.CloudProviderDO,
 	"nyc2": kops.CloudProviderDO,
@@ -185,9 +259,44 @@ var zonesToCloud = map[string]kops.CloudProviderID{
 	"fra1": kops.CloudProviderDO,
 
 	"blr1": kops.CloudProviderDO,
+
+	"cn-qingdao-b": kops.CloudProviderALI,
+	"cn-qingdao-c": kops.CloudProviderALI,
+
+	"cn-beijing-a": kops.CloudProviderALI,
+	"cn-beijing-b": kops.CloudProviderALI,
+	"cn-beijing-c": kops.CloudProviderALI,
+	"cn-beijing-d": kops.CloudProviderALI,
+	"cn-beijing-e": kops.CloudProviderALI,
+
+	"cn-zhangjiakou-a": kops.CloudProviderALI,
+
+	"cn-huhehaote-a": kops.CloudProviderALI,
+
+	"cn-hangzhou-b": kops.CloudProviderALI,
+	"cn-hangzhou-c": kops.CloudProviderALI,
+	"cn-hangzhou-d": kops.CloudProviderALI,
+	"cn-hangzhou-e": kops.CloudProviderALI,
+	"cn-hangzhou-f": kops.CloudProviderALI,
+	"cn-hangzhou-g": kops.CloudProviderALI,
+
+	"cn-shanghai-a": kops.CloudProviderALI,
+	"cn-shanghai-b": kops.CloudProviderALI,
+	"cn-shanghai-c": kops.CloudProviderALI,
+	"cn-shanghai-d": kops.CloudProviderALI,
+
+	"cn-shenzhen-a": kops.CloudProviderALI,
+	"cn-shenzhen-b": kops.CloudProviderALI,
+	"cn-shenzhen-c": kops.CloudProviderALI,
+
+	"cn-hongkong-a": kops.CloudProviderALI,
+	"cn-hongkong-b": kops.CloudProviderALI,
+	"cn-hongkong-c": kops.CloudProviderALI,
 }
 
 // GuessCloudForZone tries to infer the cloudprovider from the zone name
+// Ali has the same zoneNames as AWS in the regions outside China, so if use AliCloud to install k8s in the regions outside China,
+// the users need to provide parameter "--cloud". But the regions inside China can be easily identified.
 func GuessCloudForZone(zone string) (kops.CloudProviderID, bool) {
 	c, found := zonesToCloud[zone]
 	return c, found

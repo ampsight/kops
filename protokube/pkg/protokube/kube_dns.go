@@ -17,26 +17,31 @@ limitations under the License.
 package protokube
 
 import (
-	"github.com/golang/glog"
-	"k8s.io/kops/dns-controller/pkg/dns"
 	"time"
+
+	"k8s.io/klog"
+	"k8s.io/kops/dns-controller/pkg/dns"
 )
 
 const defaultTTL = time.Minute
 
 type DNSProvider interface {
 	Replace(fqdn string, values []string) error
+
+	// RemoveRecordsImmediate deletes the specified DNS records, without batching etc
+	RemoveRecordsImmediate(records []dns.Record) error
+
 	Run()
 }
 
 // CreateInternalDNSNameRecord maps a FQDN to the internal IP address of the current machine
 func (k *KubeBoot) CreateInternalDNSNameRecord(fqdn string) error {
 	values := []string{k.InternalIP.String()}
-	glog.Infof("Creating DNS record: %s => %s", fqdn, values)
+	klog.Infof("Creating DNS record: %s => %s", fqdn, values)
 	return k.DNS.Replace(fqdn, values)
 }
 
-// BuildInternalDNSName builds a DNS name for use inside the cluster, adding our internal DNS suffix to the key,
+// BuildInternalDNSName builds a DNS name for use inside the cluster, adding our internal DNS suffix to the key
 func (k *KubeBoot) BuildInternalDNSName(key string) string {
 	fqdn := key + k.InternalDNSSuffix
 	return fqdn
@@ -49,10 +54,14 @@ type KopsDnsProvider struct {
 
 var _ DNSProvider = &KopsDnsProvider{}
 
+func (p *KopsDnsProvider) RemoveRecordsImmediate(records []dns.Record) error {
+	return p.DNSController.RemoveRecordsImmediate(records)
+}
+
 func (p *KopsDnsProvider) Replace(fqdn string, values []string) error {
 	ttl := defaultTTL
 	if ttl != dns.DefaultTTL {
-		glog.Infof("Ignoring ttl %v for %q", ttl, fqdn)
+		klog.Infof("Ignoring ttl %v for %q", ttl, fqdn)
 	}
 
 	var records []dns.Record

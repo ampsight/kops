@@ -16,7 +16,17 @@ limitations under the License.
 
 package resources
 
-var AWSNodeUpTemplate = `#!/bin/bash
+import (
+	"bufio"
+	"bytes"
+	"fmt"
+	"mime/multipart"
+	"net/textproto"
+
+	"k8s.io/kops/pkg/apis/kops"
+)
+
+var NodeUpTemplate = `#!/bin/bash
 # Copyright 2016 The Kubernetes Authors All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -38,8 +48,7 @@ set -o pipefail
 NODEUP_URL={{ NodeUpSource }}
 NODEUP_HASH={{ NodeUpSourceHash }}
 
-{{ S3Env }}
-{{ AWS_REGION }}
+{{ EnvironmentVariables }}
 
 {{ ProxyEnv }}
 
@@ -65,11 +74,28 @@ download-or-bust() {
   while true; do
     for url in "${urls[@]}"; do
       local file="${url##*/}"
-      rm -f "${file}"
-      if ! curl -f --ipv4 -Lo "${file}" --connect-timeout 20 --retry 6 --retry-delay 10 "${url}"; then
-        echo "== Failed to download ${url}. Retrying. =="
-      elif [[ -n "${hash}" ]] && ! validate-hash "${file}" "${hash}"; then
+
+      if [[ -e "${file}" ]]; then
+        echo "== File exists for ${url} =="
+
+      # CoreOS runs this script in a container without which (but has curl)
+      # Note also that busybox wget doesn't support wget --version, but busybox doesn't normally have curl
+      # So we default to wget unless we see curl
+      elif [[ $(curl --version) ]]; then
+        if ! curl -f --ipv4 -Lo "${file}" --connect-timeout 20 --retry 6 --retry-delay 10 "${url}"; then
+          echo "== Failed to curl ${url}. Retrying. =="
+          break
+        fi
+      else
+        if ! wget --inet4-only -O "${file}" --connect-timeout=20 --tries=6 --wait=10 "${url}"; then
+          echo "== Failed to wget ${url}. Retrying. =="
+          break
+        fi
+      fi
+
+      if [[ -n "${hash}" ]] && ! validate-hash "${file}" "${hash}"; then
         echo "== Hash validation of ${url} failed. Retrying. =="
+        rm -f "${file}"
       else
         if [[ -n "${hash}" ]]; then
           echo "== Downloaded ${url} (SHA1 = ${hash}) =="
@@ -156,3 +182,73 @@ __EOF_KUBE_ENV
 download-release
 echo "== nodeup node config done =="
 `
+
+// AWSNodeUpTemplate returns a MIME Multi Part Archive containing the nodeup (bootstrap) script
+// and any additional User Data passed to using AdditionalUserData in the IG Spec
+func AWSNodeUpTemplate(ig *kops.InstanceGroup) (string, error) {
+
+	userDataTemplate := NodeUpTemplate
+
+	if len(ig.Spec.AdditionalUserData) > 0 {
+		/* Create a buffer to hold the user-data*/
+		buffer := bytes.NewBufferString("")
+		writer := bufio.NewWriter(buffer)
+
+		mimeWriter := multipart.NewWriter(writer)
+
+		// we explicitly set the boundary to make testing easier.
+		boundary := "MIMEBOUNDARY"
+		if err := mimeWriter.SetBoundary(boundary); err != nil {
+			return "", err
+		}
+
+		writer.Write([]byte(fmt.Sprintf("Content-Type: multipart/mixed; boundary=\"%s\"\r\n", boundary)))
+		writer.Write([]byte("MIME-Version: 1.0\r\n\r\n"))
+
+		var err error
+		if !ig.IsBastion() {
+			err := writeUserDataPart(mimeWriter, "nodeup.sh", "text/x-shellscript", []byte(userDataTemplate))
+			if err != nil {
+				return "", err
+			}
+		}
+
+		for _, d := range ig.Spec.AdditionalUserData {
+			err = writeUserDataPart(mimeWriter, d.Name, d.Type, []byte(d.Content))
+			if err != nil {
+				return "", err
+			}
+		}
+
+		writer.Write([]byte(fmt.Sprintf("\r\n--%s--\r\n", boundary)))
+
+		writer.Flush()
+		mimeWriter.Close()
+
+		userDataTemplate = buffer.String()
+	}
+
+	return userDataTemplate, nil
+
+}
+
+func writeUserDataPart(mimeWriter *multipart.Writer, fileName string, contentType string, content []byte) error {
+	header := textproto.MIMEHeader{}
+
+	header.Set("Content-Type", contentType)
+	header.Set("MIME-Version", "1.0")
+	header.Set("Content-Transfer-Encoding", "7bit")
+	header.Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, fileName))
+
+	partWriter, err := mimeWriter.CreatePart(header)
+	if err != nil {
+		return err
+	}
+
+	_, err = partWriter.Write(content)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}

@@ -31,6 +31,7 @@ type SysctlBuilder struct {
 
 var _ fi.ModelBuilder = &SysctlBuilder{}
 
+// Build is responsible for configuring sysctl settings
 func (b *SysctlBuilder) Build(c *fi.ModelBuilderContext) error {
 	var sysctls []string
 
@@ -49,6 +50,14 @@ func (b *SysctlBuilder) Build(c *fi.ModelBuilderContext) error {
 		sysctls = append(sysctls,
 			"kernel.softlockup_panic = 1",
 			"kernel.softlockup_all_cpu_backtrace = 1",
+			"")
+
+		// See https://github.com/kubernetes/kops/issues/6342
+		portRange := b.Cluster.Spec.KubeAPIServer.ServiceNodePortRange
+		if portRange == "" {
+			portRange = "30000-32767" // Default kube-apiserver ServiceNodePortRange
+		}
+		sysctls = append(sysctls, "net.ipv4.ip_local_reserved_ports = "+portRange,
 			"")
 
 		// See https://github.com/kubernetes/kube-deploy/issues/261
@@ -115,21 +124,17 @@ func (b *SysctlBuilder) Build(c *fi.ModelBuilderContext) error {
 			"")
 	}
 
-	if b.Cluster.Spec.CloudProvider == string(kops.CloudProviderGCE) {
-		sysctls = append(sysctls,
-			"# GCE settings",
-			"",
-			"net.ipv4.ip_forward=1",
-			"")
-	}
+	sysctls = append(sysctls,
+		"# Prevent docker from changing iptables: https://github.com/kubernetes/kubernetes/issues/40182",
+		"net.ipv4.ip_forward=1",
+		"")
 
-	t := &nodetasks.File{
+	c.AddTask(&nodetasks.File{
 		Path:            "/etc/sysctl.d/99-k8s-general.conf",
 		Contents:        fi.NewStringResource(strings.Join(sysctls, "\n")),
 		Type:            nodetasks.FileType_File,
 		OnChangeExecute: [][]string{{"sysctl", "--system"}},
-	}
-	c.AddTask(t)
+	})
 
 	return nil
 }

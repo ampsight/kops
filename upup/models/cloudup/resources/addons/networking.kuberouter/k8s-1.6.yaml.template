@@ -34,47 +34,30 @@ spec:
         tier: node
       annotations:
         scheduler.alpha.kubernetes.io/critical-pod: ''
-        pod.beta.kubernetes.io/init-containers: '[
-            {
-                "name": "install-cni",
-                "image": "busybox",
-                "command": [ "/bin/sh", "-c", "set -e -x; if [ ! -f /etc/cni/net.d/10-kuberouter.conf ]; then TMP=/etc/cni/net.d/.tmp-kuberouter-cfg; cp /etc/kube-router/cni-conf.json ${TMP}; mv ${TMP} /etc/cni/net.d/10-kuberouter.conf; fi" ],
-                "volumeMounts": [
-                    {
-                        "name": "cni",
-                        "mountPath": "/etc/cni/net.d"
-                    },
-                    {
-                        "name": "kube-router-cfg",
-                        "mountPath": "/etc/kube-router"
-                    }
-                ],
-                "volumes": {
-                     "name": "cni",
-                     "hostPath": {
-                          "path": "/etc/cni/net.d"
-                     }
-                }
-            }
-        ]'
     spec:
       containers:
       - name: kube-router
-        image: cloudnativelabs/kube-router
-        imagePullPolicy: Always
+        image: cloudnativelabs/kube-router:v0.3.1
         args:
         - --run-router=true
         - --run-firewall=true
         - --run-service-proxy=true
+        - --metrics-port=12013
         - --kubeconfig=/var/lib/kube-router/kubeconfig
         env:
         - name: NODE_NAME
           valueFrom:
             fieldRef:
               fieldPath: spec.nodeName
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 20244
+          initialDelaySeconds: 10
+          periodSeconds: 3
         resources:
           requests:
-            cpu: 250m
+            cpu: 100m
             memory: 250Mi
         securityContext:
           privileged: true
@@ -82,18 +65,34 @@ spec:
         - name: lib-modules
           mountPath: /lib/modules
           readOnly: true
-        - name: cni
+        - name: cni-conf-dir
           mountPath: /etc/cni/net.d
         - name: kubeconfig
           mountPath: /var/lib/kube-router/kubeconfig
           readOnly: true
+      initContainers:
+      - name: install-cni
+        image: busybox
+        command:
+        - /bin/sh
+        - -c
+        - set -e -x;
+          if [ ! -f /etc/cni/net.d/10-kuberouter.conf ]; then
+            TMP=/etc/cni/net.d/.tmp-kuberouter-cfg;
+            cp /etc/kube-router/cni-conf.json ${TMP};
+            mv ${TMP} /etc/cni/net.d/10-kuberouter.conf;
+          fi
+        volumeMounts:
+        - name: cni-conf-dir
+          mountPath: /etc/cni/net.d
+        - name: kube-router-cfg
+          mountPath: /etc/kube-router
       hostNetwork: true
       serviceAccountName: kube-router
       tolerations:
       - key: CriticalAddonsOnly
         operator: Exists
       - effect: NoSchedule
-        key: node-role.kubernetes.io/master
         operator: Exists
       volumes:
       - hostPath:
@@ -101,7 +100,7 @@ spec:
         name: lib-modules
       - hostPath:
           path: /etc/cni/net.d
-        name: cni
+        name: cni-conf-dir
       - name: kubeconfig
         hostPath:
           path: /var/lib/kube-router/kubeconfig
@@ -112,7 +111,7 @@ spec:
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: kube-router 
+  name: kube-router
   namespace: kube-system
 ---
 # Kube-router roles
@@ -125,10 +124,17 @@ rules:
   - apiGroups: [""]
     resources:
       - namespaces
-      - pod
-      - service
-      - node
+      - pods
+      - services
+      - nodes
       - endpoints
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - networkpolicies
     verbs:
       - get
       - list
@@ -153,3 +159,5 @@ subjects:
 - kind: ServiceAccount
   name: kube-router
   namespace: kube-system
+- kind: User
+  name: system:kube-router

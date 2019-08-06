@@ -18,18 +18,24 @@ package awstasks
 
 import (
 	"bytes"
-	"github.com/aws/aws-sdk-go/service/ec2"
-	"k8s.io/kops/cloudmock/aws/mockec2"
-	"k8s.io/kops/pkg/assets"
-	"k8s.io/kops/upup/pkg/fi"
-	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
 	"os"
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/aws/aws-sdk-go/service/ec2"
+
+	"k8s.io/kops/cloudmock/aws/mockec2"
+	"k8s.io/kops/pkg/apis/kops"
+	"k8s.io/kops/pkg/assets"
+	"k8s.io/kops/upup/pkg/fi"
+	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
 )
 
-const defaultDeadline = 2 * time.Second
+var testRunTasksOptions = fi.RunTasksOptions{
+	MaxTaskDuration:         2 * time.Second,
+	WaitAfterAllTasksFailed: 500 * time.Millisecond,
+}
 
 func TestElasticIPCreate(t *testing.T) {
 	cloud := awsup.BuildMockAWSCloud("us-east-1", "abc")
@@ -69,12 +75,12 @@ func TestElasticIPCreate(t *testing.T) {
 			Cloud: cloud,
 		}
 
-		context, err := fi.NewContext(target, cloud, nil, nil, nil, true, allTasks)
+		context, err := fi.NewContext(target, nil, cloud, nil, nil, nil, true, allTasks)
 		if err != nil {
 			t.Fatalf("error building context: %v", err)
 		}
 
-		if err := context.RunTasks(defaultDeadline); err != nil {
+		if err := context.RunTasks(testRunTasksOptions); err != nil {
 			t.Fatalf("unexpected error during Run: %v", err)
 		}
 
@@ -91,7 +97,7 @@ func TestElasticIPCreate(t *testing.T) {
 			Domain:       s("vpc"),
 			PublicIp:     s("192.0.2.1"),
 		}
-		actual := c.Addresses[0]
+		actual := c.Addresses[*eip1.ID]
 		if !reflect.DeepEqual(actual, expected) {
 			t.Fatalf("Unexpected ElasticIP: expected=%v actual=%v", expected, actual)
 		}
@@ -104,14 +110,19 @@ func TestElasticIPCreate(t *testing.T) {
 }
 
 func checkNoChanges(t *testing.T, cloud fi.Cloud, allTasks map[string]fi.Task) {
-	assetBuilder := assets.NewAssetBuilder(nil)
+	cluster := &kops.Cluster{
+		Spec: kops.ClusterSpec{
+			KubernetesVersion: "v1.9.0",
+		},
+	}
+	assetBuilder := assets.NewAssetBuilder(cluster, "")
 	target := fi.NewDryRunTarget(assetBuilder, os.Stderr)
-	context, err := fi.NewContext(target, cloud, nil, nil, nil, true, allTasks)
+	context, err := fi.NewContext(target, nil, cloud, nil, nil, nil, true, allTasks)
 	if err != nil {
 		t.Fatalf("error building context: %v", err)
 	}
 
-	if err := context.RunTasks(defaultDeadline); err != nil {
+	if err := context.RunTasks(testRunTasksOptions); err != nil {
 		t.Fatalf("unexpected error during Run: %v", err)
 	}
 

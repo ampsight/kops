@@ -18,22 +18,19 @@ package cloudup
 
 import (
 	"fmt"
-	"github.com/golang/glog"
-	"k8s.io/apimachinery/pkg/util/sets"
-	api "k8s.io/kops/pkg/apis/kops"
-	"k8s.io/kops/pkg/apis/kops/validation"
-	"k8s.io/kops/pkg/assets"
-	"k8s.io/kops/upup/pkg/fi"
-	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
 	"strings"
 	"testing"
+
+	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/klog"
+	api "k8s.io/kops/pkg/apis/kops"
+	"k8s.io/kops/pkg/apis/kops/validation"
+	"k8s.io/kops/upup/pkg/fi"
 )
 
 const MockAWSRegion = "us-mock-1"
 
 func buildDefaultCluster(t *testing.T) *api.Cluster {
-	awsup.InstallMockAWSCloud(MockAWSRegion, "abcd")
-
 	c := buildMinimalCluster()
 
 	err := PerformAssignments(c)
@@ -61,8 +58,7 @@ func buildDefaultCluster(t *testing.T) *api.Cluster {
 		}
 	}
 
-	assetBuilder := assets.NewAssetBuilder(nil)
-	fullSpec, err := PopulateClusterSpec(c, assetBuilder)
+	fullSpec, err := mockedPopulateClusterSpec(c)
 	if err != nil {
 		t.Fatalf("error from PopulateClusterSpec: %v", err)
 	}
@@ -109,7 +105,7 @@ func buildDefaultCluster(t *testing.T) *api.Cluster {
 func TestValidateFull_Default_Validates(t *testing.T) {
 	c := buildDefaultCluster(t)
 	if err := validation.ValidateCluster(c, false); err != nil {
-		glog.Infof("Cluster: %v", c)
+		klog.Infof("Cluster: %v", c)
 		t.Fatalf("Validate gave unexpected error (strict=false): %v", err)
 	}
 	if err := validation.ValidateCluster(c, true); err != nil {
@@ -154,7 +150,7 @@ func Test_Validate_No_Classic_With_14(t *testing.T) {
 		Classic: &api.ClassicNetworkingSpec{},
 	}
 
-	expectErrorFromValidate(t, c, "Spec.Networking")
+	expectErrorFromValidate(t, c, "spec.Networking")
 }
 
 func Test_Validate_Kubenet_With_14(t *testing.T) {
@@ -176,6 +172,27 @@ func TestValidate_ClusterName_Import(t *testing.T) {
 	c.ObjectMeta.Name = "kubernetes"
 
 	expectNoErrorFromValidate(t, c)
+}
+
+func TestValidate_ContainerRegistry_and_ContainerProxy_exclusivity(t *testing.T) {
+	c := buildDefaultCluster(t)
+
+	assets := new(api.Assets)
+	c.Spec.Assets = assets
+
+	expectNoErrorFromValidate(t, c)
+
+	registry := "https://registry.example.com/"
+	c.Spec.Assets.ContainerRegistry = &registry
+	expectNoErrorFromValidate(t, c)
+
+	proxy := "https://proxy.example.com/"
+	c.Spec.Assets.ContainerProxy = &proxy
+	expectErrorFromValidate(t, c, "ContainerProxy cannot be used in conjunction with ContainerRegistry")
+
+	c.Spec.Assets.ContainerRegistry = nil
+	expectNoErrorFromValidate(t, c)
+
 }
 
 func expectErrorFromValidate(t *testing.T, c *api.Cluster, message string) {

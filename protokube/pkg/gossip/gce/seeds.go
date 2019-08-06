@@ -18,10 +18,11 @@ package gce
 
 import (
 	"fmt"
-	"github.com/golang/glog"
-	compute "google.golang.org/api/compute/v0.beta"
-	"k8s.io/kops/protokube/pkg/gossip"
 	"strings"
+
+	compute "google.golang.org/api/compute/v0.beta"
+	"k8s.io/klog"
+	"k8s.io/kops/protokube/pkg/gossip"
 )
 
 type SeedProvider struct {
@@ -88,7 +89,7 @@ func (p *SeedProvider) GetSeeds() ([]string, error) {
 			}
 		}
 		if page >= maxPages {
-			glog.Errorf("GetSeeds exceeded maxPages=%d for Instances.List: truncating.", maxPages)
+			klog.Errorf("GetSeeds exceeded maxPages=%d for Instances.List: truncating.", maxPages)
 		}
 	}
 

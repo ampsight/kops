@@ -19,19 +19,22 @@ package vfsclientset
 import (
 	"bytes"
 	"fmt"
-	"github.com/golang/glog"
-	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/apis/meta/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	kops "k8s.io/kops/pkg/apis/kops"
-	"k8s.io/kops/pkg/apis/kops/v1alpha2"
-	"k8s.io/kops/util/pkg/vfs"
 	"os"
 	"reflect"
 	"sort"
 	"time"
+
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/klog"
+	"k8s.io/kops/pkg/acls"
+	"k8s.io/kops/pkg/apis/kops"
+	"k8s.io/kops/pkg/apis/kops/v1alpha2"
+	"k8s.io/kops/pkg/kopscodecs"
+	"k8s.io/kops/util/pkg/vfs"
 )
 
 var StoreVersion = v1alpha2.SchemeGroupVersion
@@ -41,25 +44,24 @@ type ValidationFunction func(o runtime.Object) error
 type commonVFS struct {
 	kind               string
 	basePath           vfs.Path
-	decoder            runtime.Decoder
 	encoder            runtime.Encoder
 	defaultReadVersion *schema.GroupVersionKind
 	validate           ValidationFunction
 }
 
 func (c *commonVFS) init(kind string, basePath vfs.Path, storeVersion runtime.GroupVersioner) {
-	yaml, ok := runtime.SerializerInfoForMediaType(kops.Codecs.SupportedMediaTypes(), "application/yaml")
+	codecs := kopscodecs.Codecs
+	yaml, ok := runtime.SerializerInfoForMediaType(codecs.SupportedMediaTypes(), "application/yaml")
 	if !ok {
-		glog.Fatalf("no YAML serializer registered")
+		klog.Fatalf("no YAML serializer registered")
 	}
-	c.encoder = kops.Codecs.EncoderForVersion(yaml.Serializer, storeVersion)
-	c.decoder = kops.Codecs.DecoderToVersion(yaml.Serializer, kops.SchemeGroupVersion)
+	c.encoder = codecs.EncoderForVersion(yaml.Serializer, storeVersion)
 
 	c.kind = kind
 	c.basePath = basePath
 }
 
-func (c *commonVFS) get(name string) (runtime.Object, error) {
+func (c *commonVFS) find(name string) (runtime.Object, error) {
 	o, err := c.readConfig(c.basePath.Join(name))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -74,7 +76,7 @@ func (c *commonVFS) list(items interface{}, options metav1.ListOptions) (interfa
 	return c.readAll(items)
 }
 
-func (c *commonVFS) create(i runtime.Object) error {
+func (c *commonVFS) create(cluster *kops.Cluster, i runtime.Object) error {
 	objectMeta, err := meta.Accessor(i)
 	if err != nil {
 		return err
@@ -92,7 +94,7 @@ func (c *commonVFS) create(i runtime.Object) error {
 		objectMeta.SetCreationTimestamp(v1.NewTime(time.Now().UTC()))
 	}
 
-	err = c.writeConfig(c.basePath.Join(objectMeta.GetName()), i, vfs.WriteOptionCreate)
+	err = c.writeConfig(cluster, c.basePath.Join(objectMeta.GetName()), i, vfs.WriteOptionCreate)
 	if err != nil {
 		if os.IsExist(err) {
 			return err
@@ -122,17 +124,17 @@ func (c *commonVFS) readConfig(configPath vfs.Path) (runtime.Object, error) {
 		return nil, fmt.Errorf("error reading %s: %v", configPath, err)
 	}
 
-	object, _, err := c.decoder.Decode(data, c.defaultReadVersion, nil)
+	object, _, err := kopscodecs.Decode(data, c.defaultReadVersion)
 	if err != nil {
 		return nil, fmt.Errorf("error parsing %s: %v", configPath, err)
 	}
 	return object, nil
 }
 
-func (c *commonVFS) writeConfig(configPath vfs.Path, o runtime.Object, writeOptions ...vfs.WriteOption) error {
+func (c *commonVFS) writeConfig(cluster *kops.Cluster, configPath vfs.Path, o runtime.Object, writeOptions ...vfs.WriteOption) error {
 	data, err := c.serialize(o)
 	if err != nil {
-		return fmt.Errorf("error marshalling object: %v", err)
+		return fmt.Errorf("error marshaling object: %v", err)
 	}
 
 	create := false
@@ -153,14 +155,20 @@ func (c *commonVFS) writeConfig(configPath vfs.Path, o runtime.Object, writeOpti
 		}
 	}
 
+	acl, err := acls.GetACL(configPath, cluster)
+	if err != nil {
+		return err
+	}
+
+	rs := bytes.NewReader(data)
 	if create {
-		err = configPath.CreateFile(data)
+		err = configPath.CreateFile(rs, acl)
 	} else {
-		err = configPath.WriteFile(data)
+		err = configPath.WriteFile(rs, acl)
 	}
 	if err != nil {
 		if create && os.IsExist(err) {
-			glog.Warningf("failed to create file as already exists: %v", configPath)
+			klog.Warningf("failed to create file as already exists: %v", configPath)
 			return err
 		}
 		return fmt.Errorf("error writing configuration file %s: %v", configPath, err)
@@ -168,7 +176,7 @@ func (c *commonVFS) writeConfig(configPath vfs.Path, o runtime.Object, writeOpti
 	return nil
 }
 
-func (c *commonVFS) update(i runtime.Object) error {
+func (c *commonVFS) update(cluster *kops.Cluster, i runtime.Object) error {
 	objectMeta, err := meta.Accessor(i)
 	if err != nil {
 		return err
@@ -186,7 +194,7 @@ func (c *commonVFS) update(i runtime.Object) error {
 		objectMeta.SetCreationTimestamp(v1.NewTime(time.Now().UTC()))
 	}
 
-	err = c.writeConfig(c.basePath.Join(objectMeta.GetName()), i, vfs.WriteOptionOnlyIfExists)
+	err = c.writeConfig(cluster, c.basePath.Join(objectMeta.GetName()), i, vfs.WriteOptionOnlyIfExists)
 	if err != nil {
 		return fmt.Errorf("error writing %s: %v", c.kind, err)
 	}
@@ -231,7 +239,7 @@ func (c *commonVFS) readAll(items interface{}) (interface{}, error) {
 	}
 
 	for _, name := range names {
-		o, err := c.get(name)
+		o, err := c.find(name)
 		if err != nil {
 			return nil, err
 		}

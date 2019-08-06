@@ -16,7 +16,8 @@ limitations under the License.
 
 // +k8s:openapi-gen=true
 // +k8s:conversion-gen=k8s.io/kops/pkg/apis/kops
+// +k8s:deepcopy-gen=package,register
 // +k8s:defaulter-gen=TypeMeta
 
-// +groupName=kops
+// +groupName=kops.k8s.io
 package v1alpha2 // import "k8s.io/kops/pkg/apis/kops/v1alpha2"

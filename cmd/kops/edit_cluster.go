@@ -26,24 +26,26 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/kops/cmd/kops/util"
 	api "k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/apis/kops/registry"
 	"k8s.io/kops/pkg/apis/kops/validation"
 	"k8s.io/kops/pkg/assets"
+	"k8s.io/kops/pkg/commands"
 	"k8s.io/kops/pkg/edit"
+	"k8s.io/kops/pkg/kopscodecs"
+	"k8s.io/kops/pkg/try"
 	"k8s.io/kops/upup/pkg/fi/cloudup"
-	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	util_editor "k8s.io/kubernetes/pkg/kubectl/cmd/util/editor"
-	"k8s.io/kubernetes/pkg/util/i18n"
+	"k8s.io/kubernetes/pkg/kubectl/util/i18n"
+	"k8s.io/kubernetes/pkg/kubectl/util/templates"
 )
 
 type EditClusterOptions struct {
 }
 
 var (
-	edit_cluster_long = templates.LongDesc(i18n.T(`Edit a cluster configuration.
+	editClusterLong = templates.LongDesc(i18n.T(`Edit a cluster configuration.
 
 	This command changes the desired cluster configuration in the registry.
 
@@ -52,7 +54,7 @@ var (
 
 	kops edit does not update the cloud resources, to apply the changes use "kops update cluster".`))
 
-	edit_cluster_example = templates.Examples(i18n.T(`
+	editClusterExample = templates.Examples(i18n.T(`
 		# Edit a cluster configuration in AWS.
 		kops edit cluster k8s.cluster.site --state=s3://kops-state-1234
 	`))
@@ -64,8 +66,8 @@ func NewCmdEditCluster(f *util.Factory, out io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "cluster",
 		Short:   i18n.T("Edit cluster."),
-		Long:    edit_cluster_long,
-		Example: edit_cluster_example,
+		Long:    editClusterLong,
+		Example: editClusterExample,
 		Run: func(cmd *cobra.Command, args []string) {
 			err := RunEditCluster(f, cmd, args, out, options)
 			if err != nil {
@@ -98,13 +100,9 @@ func RunEditCluster(f *util.Factory, cmd *cobra.Command, args []string, out io.W
 		return err
 	}
 
-	list, err := clientset.InstanceGroupsFor(oldCluster).List(metav1.ListOptions{})
+	instanceGroups, err := commands.ReadAllInstanceGroups(clientset, oldCluster)
 	if err != nil {
 		return err
-	}
-	var instancegroups []*api.InstanceGroup
-	for i := range list.Items {
-		instancegroups = append(instancegroups, &list.Items[i])
 	}
 
 	var (
@@ -112,7 +110,7 @@ func RunEditCluster(f *util.Factory, cmd *cobra.Command, args []string, out io.W
 	)
 
 	ext := "yaml"
-	raw, err := api.ToVersionedYaml(oldCluster)
+	raw, err := kopscodecs.ToVersionedYaml(oldCluster)
 	if err != nil {
 		return err
 	}
@@ -150,11 +148,11 @@ func RunEditCluster(f *util.Factory, cmd *cobra.Command, args []string, out io.W
 		}
 
 		if len(results.file) > 0 {
-			os.Remove(results.file)
+			try.RemoveFile(results.file)
 		}
 
 		if bytes.Equal(stripComments(raw), stripComments(edited)) {
-			os.Remove(file)
+			try.RemoveFile(file)
 			fmt.Fprintln(out, "Edit cancelled, no changes made.")
 			return nil
 		}
@@ -164,12 +162,12 @@ func RunEditCluster(f *util.Factory, cmd *cobra.Command, args []string, out io.W
 			return preservedFile(err, file, out)
 		}
 		if !lines {
-			os.Remove(file)
+			try.RemoveFile(file)
 			fmt.Fprintln(out, "Edit cancelled, saved file was empty.")
 			return nil
 		}
 
-		newObj, _, err := api.ParseVersionedYaml(edited)
+		newObj, _, err := kopscodecs.Decode(edited, nil)
 		if err != nil {
 			return preservedFile(fmt.Errorf("error parsing config: %s", err), file, out)
 		}
@@ -210,8 +208,8 @@ func RunEditCluster(f *util.Factory, cmd *cobra.Command, args []string, out io.W
 			return preservedFile(fmt.Errorf("error populating configuration: %v", err), file, out)
 		}
 
-		assetBuilder := assets.NewAssetBuilder(newCluster.Spec.Assets)
-		fullCluster, err := cloudup.PopulateClusterSpec(newCluster, assetBuilder)
+		assetBuilder := assets.NewAssetBuilder(newCluster, "")
+		fullCluster, err := cloudup.PopulateClusterSpec(clientset, newCluster, assetBuilder)
 		if err != nil {
 			results = editResults{
 				file: file,
@@ -221,7 +219,7 @@ func RunEditCluster(f *util.Factory, cmd *cobra.Command, args []string, out io.W
 			continue
 		}
 
-		err = validation.DeepValidate(fullCluster, instancegroups, true)
+		err = validation.DeepValidate(fullCluster, instanceGroups, true)
 		if err != nil {
 			results = editResults{
 				file: file,
@@ -236,13 +234,20 @@ func RunEditCluster(f *util.Factory, cmd *cobra.Command, args []string, out io.W
 			return preservedFile(err, file, out)
 		}
 
+		// Retrieve the current status of the cluster.  This will eventually be part of the cluster object.
+		statusDiscovery := &commands.CloudDiscoveryStatusStore{}
+		status, err := statusDiscovery.FindClusterStatus(oldCluster)
+		if err != nil {
+			return err
+		}
+
 		// Note we perform as much validation as we can, before writing a bad config
-		_, err = clientset.UpdateCluster(newCluster)
+		_, err = clientset.UpdateCluster(newCluster, status)
 		if err != nil {
 			return preservedFile(err, file, out)
 		}
 
-		err = registry.WriteConfigDeprecated(configBase.Join(registry.PathClusterCompleted), fullCluster)
+		err = registry.WriteConfigDeprecated(newCluster, configBase.Join(registry.PathClusterCompleted), fullCluster)
 		if err != nil {
 			return preservedFile(fmt.Errorf("error writing completed cluster spec: %v", err), file, out)
 		}

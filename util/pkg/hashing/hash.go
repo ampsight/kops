@@ -23,11 +23,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"github.com/golang/glog"
 	"hash"
 	"io"
 	"os"
 	"strings"
+
+	"k8s.io/klog"
+
+	"k8s.io/kops/pkg/try"
 )
 
 type HashAlgorithm string
@@ -63,7 +66,7 @@ func (ha HashAlgorithm) NewHasher() hash.Hash {
 		return sha256.New()
 	}
 
-	glog.Exitf("Unknown hash algorithm: %v", ha)
+	klog.Exitf("Unknown hash algorithm: %v", ha)
 	return nil
 }
 
@@ -131,7 +134,7 @@ func (ha HashAlgorithm) HashFile(p string) (*Hash, error) {
 		}
 		return nil, fmt.Errorf("error opening file %q: %v", p, err)
 	}
-	defer f.Close()
+	defer try.CloseFile(f)
 	return ha.Hash(f)
 }
 

@@ -17,9 +17,10 @@ limitations under the License.
 package model
 
 import (
-	"github.com/golang/glog"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/nodeup/nodetasks"
+
+	"k8s.io/klog"
 )
 
 // PackagesBuilder adds miscellaneous OS packages that we need
@@ -29,20 +30,24 @@ type PackagesBuilder struct {
 
 var _ fi.ModelBuilder = &DockerBuilder{}
 
+// Build is responsible for installing packages
 func (b *PackagesBuilder) Build(c *fi.ModelBuilderContext) error {
 	// kubelet needs:
+	//   conntrack  - kops #5671
 	//   ebtables - kops #1711
 	//   ethtool - kops #1830
 	if b.Distribution.IsDebianFamily() {
+		c.AddTask(&nodetasks.Package{Name: "conntrack"})
 		c.AddTask(&nodetasks.Package{Name: "ebtables"})
 		c.AddTask(&nodetasks.Package{Name: "ethtool"})
 	} else if b.Distribution.IsRHELFamily() {
+		c.AddTask(&nodetasks.Package{Name: "conntrack-tools"})
 		c.AddTask(&nodetasks.Package{Name: "ebtables"})
 		c.AddTask(&nodetasks.Package{Name: "ethtool"})
 		c.AddTask(&nodetasks.Package{Name: "socat"})
 	} else {
 		// Hopefully it's already installed
-		glog.Infof("ebtables package not known for distro %q", b.Distribution)
+		klog.Infof("ebtables package not known for distro %q", b.Distribution)
 	}
 
 	return nil

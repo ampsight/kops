@@ -26,7 +26,7 @@ import (
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/nodeup/nodetasks"
 
-	"github.com/golang/glog"
+	"k8s.io/klog"
 )
 
 // HookBuilder configures the hooks
@@ -48,21 +48,21 @@ func (h *HookBuilder) Build(c *fi.ModelBuilderContext) error {
 				continue
 			}
 
-			// i dont want to effect those whom are already using the hooks, so i'm gonna try an keep the name for now
+			// I don't want to affect those whom are already using the hooks, so I'm going to try to keep the name for now
 			// i.e. use the default naming convention - kops-hook-<index>, only those using the Name or hooks in IG should alter
 			var name string
 			switch hook.Name {
 			case "":
 				name = fmt.Sprintf("kops-hook-%d", j)
 				if isInstanceGroup {
-					name = fmt.Sprintf("%s-ig", name)
+					name += "-ig"
 				}
 			default:
 				name = hook.Name
 			}
 
 			if _, found := hookNames[name]; found {
-				glog.V(2).Infof("Skipping the hook: %v as we've already processed a similar service name", name)
+				klog.V(2).Infof("Skipping the hook: %v as we've already processed a similar service name", name)
 				continue
 			}
 			hookNames[name] = true
@@ -72,7 +72,7 @@ func (h *HookBuilder) Build(c *fi.ModelBuilderContext) error {
 				enabled := false
 				managed := true
 				c.AddTask(&nodetasks.Service{
-					Name:        hook.Name,
+					Name:        h.EnsureSystemdSuffix(name),
 					ManageState: &managed,
 					Enabled:     &enabled,
 					Running:     &enabled,
@@ -98,40 +98,46 @@ func (h *HookBuilder) Build(c *fi.ModelBuilderContext) error {
 func (h *HookBuilder) buildSystemdService(name string, hook *kops.HookSpec) (*nodetasks.Service, error) {
 	// perform some basic validation
 	if hook.ExecContainer == nil && hook.Manifest == "" {
-		glog.Warningf("hook: %s has neither a raw unit or exec image configured", name)
+		klog.Warningf("hook: %s has neither a raw unit or exec image configured", name)
 		return nil, nil
 	}
 	if hook.ExecContainer != nil {
 		if err := isValidExecContainerAction(hook.ExecContainer); err != nil {
-			glog.Warningf("invalid hook action, name: %s, error: %v", name, err)
+			klog.Warningf("invalid hook action, name: %s, error: %v", name, err)
 			return nil, nil
 		}
 	}
 	// build the base unit file
-	unit := &systemd.Manifest{}
-	unit.Set("Unit", "Description", "Kops Hook "+name)
+	var definition *string
+	if hook.UseRawManifest {
+		definition = s(hook.Manifest)
+	} else {
+		unit := &systemd.Manifest{}
+		unit.Set("Unit", "Description", "Kops Hook "+name)
 
-	// add any service dependencies to the unit
-	for _, x := range hook.Requires {
-		unit.Set("Unit", "Requires", x)
-	}
-	for _, x := range hook.Before {
-		unit.Set("Unit", "Before", x)
-	}
-
-	// are we a raw unit file or a docker exec?
-	switch hook.ExecContainer {
-	case nil:
-		unit.SetSection("Service", hook.Manifest)
-	default:
-		if err := h.buildDockerService(unit, hook); err != nil {
-			return nil, err
+		// add any service dependencies to the unit
+		for _, x := range hook.Requires {
+			unit.Set("Unit", "Requires", x)
 		}
+		for _, x := range hook.Before {
+			unit.Set("Unit", "Before", x)
+		}
+
+		// are we a raw unit file or a docker exec?
+		switch hook.ExecContainer {
+		case nil:
+			unit.SetSection("Service", hook.Manifest)
+		default:
+			if err := h.buildDockerService(unit, hook); err != nil {
+				return nil, err
+			}
+		}
+		definition = s(unit.Render())
 	}
 
 	service := &nodetasks.Service{
-		Name:       name,
-		Definition: s(unit.Render()),
+		Name:       h.EnsureSystemdSuffix(name),
+		Definition: definition,
 	}
 
 	service.InitDefaults()
@@ -165,7 +171,7 @@ func (h *HookBuilder) buildDockerService(unit *systemd.Manifest, hook *kops.Hook
 	return nil
 }
 
-// isValidExecContainerAction checks the validatity of the execContainer - personally i think this validation
+// isValidExecContainerAction checks the validity of the execContainer - personally i think this validation
 // should be done high up the chain, but
 func isValidExecContainerAction(action *kops.ExecContainerAction) error {
 	action.Image = strings.TrimSpace(action.Image)

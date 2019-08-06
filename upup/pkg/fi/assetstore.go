@@ -24,12 +24,13 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
+	"k8s.io/klog"
 	"k8s.io/kops/upup/pkg/fi/utils"
 	"k8s.io/kops/util/pkg/hashing"
-
-	"github.com/golang/glog"
 )
 
 type asset struct {
@@ -57,7 +58,7 @@ func (s *Source) Key() string {
 	} else if s.ExtractFromArchive != "" {
 		k += s.ExtractFromArchive
 	} else {
-		glog.Fatalf("expected either URL or ExtractFromArchive to be set")
+		klog.Fatalf("expected either URL or ExtractFromArchive to be set")
 	}
 	return k
 }
@@ -117,19 +118,19 @@ func (a *AssetStore) Find(key string, assetPath string) (Resource, error) {
 		return nil, nil
 	}
 	if len(matches) == 1 {
-		glog.Infof("Resolved asset %s:%s to %s", key, assetPath, matches[0].AssetPath)
+		klog.Infof("Resolved asset %s:%s to %s", key, assetPath, matches[0].AssetPath)
 		return &assetResource{asset: matches[0]}, nil
 	}
 
-	glog.Infof("Matching assets:")
+	klog.Infof("Matching assets:")
 	for _, match := range matches {
-		glog.Infof("    %s %s", match.Key, match.AssetPath)
+		klog.Infof("    %s %s", match.Key, match.AssetPath)
 	}
 	return nil, fmt.Errorf("found multiple matching assets for key: %q", key)
 }
 
 func hashFromHttpHeader(url string) (*hashing.Hash, error) {
-	glog.Infof("Doing HTTP HEAD on %q", url)
+	klog.Infof("Doing HTTP HEAD on %q", url)
 	response, err := http.Head(url)
 	if err != nil {
 		return nil, fmt.Errorf("error doing HEAD on %q: %v", url, err)
@@ -153,45 +154,67 @@ func hashFromHttpHeader(url string) (*hashing.Hash, error) {
 // Add an asset into the store, in one of the recognized formats (see Assets in types package)
 func (a *AssetStore) Add(id string) error {
 	if strings.HasPrefix(id, "http://") || strings.HasPrefix(id, "https://") {
-		return a.addURL(id, nil)
+		return a.addURLs(strings.Split(id, ","), nil)
 	}
 	i := strings.Index(id, "@http://")
 	if i == -1 {
 		i = strings.Index(id, "@https://")
 	}
 	if i != -1 {
-		url := id[i+1:]
+		urls := strings.Split(id[i+1:], ",")
 		hash, err := hashing.FromString(id[:i])
 		if err != nil {
 			return err
 		}
-		return a.addURL(url, hash)
+		return a.addURLs(urls, hash)
 	}
 	// TODO: local files!
 	return fmt.Errorf("unknown asset format: %q", id)
 }
 
-func (a *AssetStore) addURL(url string, hash *hashing.Hash) error {
-	var err error
+func (a *AssetStore) addURLs(urls []string, hash *hashing.Hash) error {
+	if len(urls) == 0 {
+		return fmt.Errorf("no urls were specified")
+	}
 
+	var err error
 	if hash == nil {
-		hash, err = hashFromHttpHeader(url)
+		for _, url := range urls {
+			hash, err = hashFromHttpHeader(url)
+			if err != nil {
+				klog.Warningf("unable to get hash from %q: %v", url, err)
+				continue
+			} else {
+				break
+			}
+		}
 		if err != nil {
 			return err
 		}
 	}
 
-	localFile := path.Join(a.cacheDir, hash.String()+"_"+utils.SanitizeString(url))
-	_, err = DownloadURL(url, localFile, hash)
+	// We assume the first url is the "main" url, and download to that _name_, wherever we get it from
+	primaryURL := urls[0]
+	localFile := path.Join(a.cacheDir, hash.String()+"_"+utils.SanitizeString(primaryURL))
+
+	for _, url := range urls {
+		_, err = DownloadURL(url, localFile, hash)
+		if err != nil {
+			klog.Warningf("error downloading url %q: %v", url, err)
+			continue
+		} else {
+			break
+		}
+	}
 	if err != nil {
 		return err
 	}
 
-	key := path.Base(url)
-	assetPath := url
+	key := path.Base(primaryURL)
+	assetPath := primaryURL
 	r := NewFileResource(localFile)
 
-	source := &Source{URL: url, Hash: hash}
+	source := &Source{URL: primaryURL, Hash: hash}
 
 	asset := &asset{
 		Key:       key,
@@ -199,10 +222,13 @@ func (a *AssetStore) addURL(url string, hash *hashing.Hash) error {
 		resource:  r,
 		source:    source,
 	}
-	glog.V(2).Infof("added asset %q for %q", asset.Key, asset.resource)
+	klog.V(2).Infof("added asset %q for %q", asset.Key, asset.resource)
 	a.assets = append(a.assets, asset)
 
-	if strings.HasSuffix(assetPath, ".tar.gz") {
+	// normalize filename suffix
+	file := strings.ToLower(assetPath)
+	// pickup both tar.gz and tgz files
+	if strings.HasSuffix(file, ".tar.gz") || strings.HasSuffix(file, ".tgz") {
 		err = a.addArchive(source, localFile)
 		if err != nil {
 			return err
@@ -241,7 +267,7 @@ func (a *AssetStore) addURL(url string, hash *hashing.Hash) error {
 //		AssetPath: assetPath,
 //		resource:  r,
 //	}
-//	glog.V(2).Infof("added asset %q for %q", asset.Key, asset.resource)
+//	klog.V(2).Infof("added asset %q for %q", asset.Key, asset.resource)
 //	a.assets = append(a.assets, asset)
 //
 //	if strings.HasSuffix(assetPath, ".tar.gz") {
@@ -257,19 +283,25 @@ func (a *AssetStore) addURL(url string, hash *hashing.Hash) error {
 func (a *AssetStore) addArchive(archiveSource *Source, archiveFile string) error {
 	extracted := path.Join(a.cacheDir, "extracted/"+path.Base(archiveFile))
 
-	// TODO: Use a temp file so this is atomic
 	if _, err := os.Stat(extracted); os.IsNotExist(err) {
-		err := os.MkdirAll(extracted, 0755)
+		// We extract to a temporary dir which we then rename so this is atomic
+		// (untarring can be slow, and we might crash / be interrupted half-way through)
+		extractedTemp := extracted + ".tmp-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+		err := os.MkdirAll(extractedTemp, 0755)
 		if err != nil {
-			return fmt.Errorf("error creating directories %q: %v", path.Dir(extracted), err)
+			return fmt.Errorf("error creating directories %q: %v", path.Dir(extractedTemp), err)
 		}
 
-		args := []string{"tar", "zxf", archiveFile, "-C", extracted}
-		glog.Infof("running extract command %s", args)
+		args := []string{"tar", "zxf", archiveFile, "-C", extractedTemp}
+		klog.Infof("running extract command %s", args)
 		cmd := exec.Command(args[0], args[1:]...)
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("error expanding asset file %q %v: %s", archiveFile, err, string(output))
+		}
+
+		if err := os.Rename(extractedTemp, extracted); err != nil {
+			return fmt.Errorf("error renaming extracted temp dir %s -> %s: %v", extractedTemp, extracted, err)
 		}
 	}
 
@@ -300,7 +332,7 @@ func (a *AssetStore) addArchive(archiveSource *Source, archiveFile string) error
 			resource:  r,
 			source:    &Source{Parent: archiveSource, ExtractFromArchive: assetPath},
 		}
-		glog.V(2).Infof("added asset %q for %q", asset.Key, asset.resource)
+		klog.V(2).Infof("added asset %q for %q", asset.Key, asset.resource)
 		a.assets = append(a.assets, asset)
 
 		return nil

@@ -26,11 +26,12 @@ import (
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/apis/kops/util"
 	"k8s.io/kops/pkg/assets"
+	"k8s.io/kops/pkg/k8sversion"
 	"k8s.io/kops/upup/pkg/fi/cloudup/gce"
 	"k8s.io/kops/util/pkg/vfs"
 
 	"github.com/blang/semver"
-	"github.com/golang/glog"
+	"k8s.io/klog"
 )
 
 // OptionsContext is the context object for options builders
@@ -74,10 +75,13 @@ func UsesKubenet(clusterSpec *kops.ClusterSpec) (bool, error) {
 		return false, nil
 	} else if networking.Kubenet != nil {
 		return true, nil
+	} else if networking.GCE != nil {
+		// GCE IP Alias networking is based on kubenet
+		return true, nil
 	} else if networking.External != nil {
 		// external is based on kubenet
 		return true, nil
-	} else if networking.CNI != nil || networking.Weave != nil || networking.Flannel != nil || networking.Calico != nil || networking.Canal != nil || networking.Kuberouter != nil {
+	} else if networking.CNI != nil || networking.Weave != nil || networking.Flannel != nil || networking.Calico != nil || networking.Canal != nil || networking.Kuberouter != nil || networking.Romana != nil || networking.AmazonVPC != nil || networking.Cilium != nil || networking.LyftVPC != nil {
 		return false, nil
 	} else if networking.Kopeio != nil {
 		// Kopeio is based on kubenet / external
@@ -120,7 +124,7 @@ func WellKnownServiceIP(clusterSpec *kops.ClusterSpec, id int) (net.IP, error) {
 }
 
 func IsBaseURL(kubernetesVersion string) bool {
-	return strings.HasPrefix(kubernetesVersion, "http:") || strings.HasPrefix(kubernetesVersion, "https:")
+	return strings.HasPrefix(kubernetesVersion, "http:") || strings.HasPrefix(kubernetesVersion, "https:") || strings.HasPrefix(kubernetesVersion, "memfs:")
 }
 
 // Image returns the docker image name for the specified component
@@ -131,11 +135,16 @@ func Image(component string, clusterSpec *kops.ClusterSpec, assetsBuilder *asset
 	// TODO remove this, as it is an addon now
 	if component == "kube-dns" {
 		// TODO: Once we are shipping different versions, start to use them
-		return "gcr.io/google_containers/kubedns-amd64:1.3", nil
+		return "k8s.gcr.io/kubedns-amd64:1.3", nil
+	}
+
+	kubernetesVersion, err := k8sversion.Parse(clusterSpec.KubernetesVersion)
+	if err != nil {
+		return "", err
 	}
 
 	if !IsBaseURL(clusterSpec.KubernetesVersion) {
-		image := "gcr.io/google_containers/" + component + ":" + "v" + clusterSpec.KubernetesVersion
+		image := "k8s.gcr.io/" + component + ":" + "v" + kubernetesVersion.String()
 
 		image, err := assetsBuilder.RemapImage(image)
 		if err != nil {
@@ -147,17 +156,29 @@ func Image(component string, clusterSpec *kops.ClusterSpec, assetsBuilder *asset
 	baseURL := clusterSpec.KubernetesVersion
 	baseURL = strings.TrimSuffix(baseURL, "/")
 
+	// TODO path.Join here?
 	tagURL := baseURL + "/bin/linux/amd64/" + component + ".docker_tag"
-	glog.V(2).Infof("Downloading docker tag for %s from: %s", component, tagURL)
+	klog.V(2).Infof("Downloading docker tag for %s from: %s", component, tagURL)
 
 	b, err := vfs.Context.ReadFile(tagURL)
 	if err != nil {
 		return "", fmt.Errorf("error reading tag file %q: %v", tagURL, err)
 	}
 	tag := strings.TrimSpace(string(b))
-	glog.V(2).Infof("Found tag %q for %q", tag, component)
+	klog.V(2).Infof("Found tag %q for %q", tag, component)
 
-	return "gcr.io/google_containers/" + component + ":" + tag, nil
+	image := "k8s.gcr.io/" + component + ":" + tag
+
+	// When we're using a docker load-ed image, we are likely a CI build.
+	// But the k8s.gcr.io prefix is an alias, and we only double-tagged from 1.10 onwards.
+	// For versions prior to 1.10, remap k8s.gcr.io to the old name.
+	// This also means that we won't start using the aliased names on existing clusters,
+	// which could otherwise be surprising to users.
+	if !kubernetesVersion.IsGTE("1.10") {
+		image = "gcr.io/google_containers/" + strings.TrimPrefix(image, "k8s.gcr.io/")
+	}
+
+	return image, nil
 }
 
 func GCETagForRole(clusterName string, role kops.InstanceGroupRole) string {

@@ -18,12 +18,14 @@ package cloudup
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 
-	"github.com/blang/semver"
-	"github.com/golang/glog"
+	"k8s.io/klog"
 	api "k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/apis/kops/util"
+	"k8s.io/kops/pkg/assets"
+	"k8s.io/kops/util/pkg/hashing"
 )
 
 func usesCNI(c *api.Cluster) bool {
@@ -34,7 +36,12 @@ func usesCNI(c *api.Cluster) bool {
 	}
 
 	if networkConfig.Kubenet != nil {
-		// kubenet
+		// kubenet is now configured via CNI
+		return true
+	}
+
+	if networkConfig.GCE != nil {
+		// GCE is kubenet at the node level
 		return true
 	}
 
@@ -73,13 +80,33 @@ func usesCNI(c *api.Cluster) bool {
 		return true
 	}
 
+	if networkConfig.Romana != nil {
+		//  Romana uses CNI
+		return true
+	}
+
+	if networkConfig.AmazonVPC != nil {
+		//  AmazonVPC uses CNI
+		return true
+	}
+
+	if networkConfig.Cilium != nil {
+		// Cilium uses CNI
+		return true
+	}
+
 	if networkConfig.CNI != nil {
 		// CNI definitely uses CNI!
 		return true
 	}
 
+	if networkConfig.LyftVPC != nil {
+		// LyftVPC uses CNI
+		return true
+	}
+
 	// Assume other modes also use CNI
-	glog.Warningf("Unknown networking mode configured")
+	klog.Warningf("Unknown networking mode configured")
 	return true
 }
 
@@ -97,30 +124,81 @@ const (
 	defaultCNIAssetK8s1_6           = "https://storage.googleapis.com/kubernetes-release/network-plugins/cni-0799f5732f2a11b329d9e3d51b9c8f2e3759f2ff.tar.gz"
 	defaultCNIAssetHashStringK8s1_6 = "1d9788b0f5420e1a219aad2cb8681823fc515e7c"
 
+	// defaultCNIAssetK8s1_9 is the CNI tarball for 1.9.x k8s.
+	defaultCNIAssetK8s1_9           = "https://storage.googleapis.com/kubernetes-release/network-plugins/cni-plugins-amd64-v0.6.0.tgz"
+	defaultCNIAssetHashStringK8s1_9 = "d595d3ded6499a64e8dac02466e2f5f2ce257c9f"
+
+	// defaultCNIAssetK8s1_11 is the CNI tarball for k8s >= 1.11
+	defaultCNIAssetK8s1_11           = "https://storage.googleapis.com/kubernetes-release/network-plugins/cni-plugins-amd64-v0.7.5.tgz"
+	defaultCNIAssetHashStringK8s1_11 = "52e9d2de8a5f927307d9397308735658ee44ab8d"
+
 	// Environment variable for overriding CNI url
-	ENV_VAR_CNI_VERSION_URL = "CNI_VERSION_URL"
+	ENV_VAR_CNI_VERSION_URL       = "CNI_VERSION_URL"
+	ENV_VAR_CNI_ASSET_HASH_STRING = "CNI_ASSET_HASH_STRING"
 )
 
-func findCNIAssets(c *api.Cluster) (string, string, error) {
+func findCNIAssets(c *api.Cluster, assetBuilder *assets.AssetBuilder) (*url.URL, *hashing.Hash, error) {
 
 	if cniVersionURL := os.Getenv(ENV_VAR_CNI_VERSION_URL); cniVersionURL != "" {
-		glog.Infof("Using CNI asset version %q, as set in %s", cniVersionURL, ENV_VAR_CNI_VERSION_URL)
-		return cniVersionURL, "", nil
+		u, err := url.Parse(cniVersionURL)
+		if err != nil {
+			return nil, nil, fmt.Errorf("unable to parse %q as a URL: %v", cniVersionURL, err)
+		}
+
+		klog.Infof("Using CNI asset version %q, as set in %s", cniVersionURL, ENV_VAR_CNI_VERSION_URL)
+
+		if cniAssetHashString := os.Getenv(ENV_VAR_CNI_ASSET_HASH_STRING); cniAssetHashString != "" {
+
+			klog.Infof("Using CNI asset hash %q, as set in %s", cniAssetHashString, ENV_VAR_CNI_ASSET_HASH_STRING)
+
+			hash, err := hashing.FromString(cniAssetHashString)
+			if err != nil {
+				return nil, nil, fmt.Errorf("unable to parse CNI asset hash %q", cniAssetHashString)
+			}
+			return u, hash, nil
+		} else {
+			return u, nil, nil
+		}
 	}
 
 	sv, err := util.ParseKubernetesVersion(c.Spec.KubernetesVersion)
 	if err != nil {
-		return "", "", fmt.Errorf("Failed to lookup kubernetes version: %v", err)
+		return nil, nil, fmt.Errorf("failed to lookup kubernetes version: %v", err)
 	}
 
-	sv.Pre = nil
-	sv.Build = nil
-
-	if sv.GTE(semver.Version{Major: 1, Minor: 6, Patch: 0, Pre: nil, Build: nil}) {
-		glog.V(2).Infof("Adding default CNI asset: %s", defaultCNIAssetK8s1_6)
-		return defaultCNIAssetK8s1_6, defaultCNIAssetHashStringK8s1_6, nil
+	var cniAsset, cniAssetHash string
+	if util.IsKubernetesGTE("1.11", *sv) {
+		cniAsset = defaultCNIAssetK8s1_11
+		cniAssetHash = defaultCNIAssetHashStringK8s1_11
+		klog.V(2).Infof("Adding default CNI asset for k8s >= 1.11: %s", defaultCNIAssetK8s1_9)
+	} else if util.IsKubernetesGTE("1.9", *sv) {
+		cniAsset = defaultCNIAssetK8s1_9
+		cniAssetHash = defaultCNIAssetHashStringK8s1_9
+		klog.V(2).Infof("Adding default CNI asset for 1.11 > k8s >= 1.9: %s", defaultCNIAssetK8s1_9)
+	} else if util.IsKubernetesGTE("1.6", *sv) {
+		cniAsset = defaultCNIAssetK8s1_6
+		cniAssetHash = defaultCNIAssetHashStringK8s1_6
+		klog.V(2).Infof("Adding default CNI asset for 1.9 > k8s >= 1.6: %s", defaultCNIAssetK8s1_6)
+	} else {
+		cniAsset = defaultCNIAssetK8s1_5
+		cniAssetHash = defaultCNIAssetHashStringK8s1_5
+		klog.V(2).Infof("Adding default CNI asset for 1.6 > k8s >= 1.5: %s", defaultCNIAssetK8s1_5)
 	}
 
-	glog.V(2).Infof("Adding default CNI asset: %s", defaultCNIAssetK8s1_5)
-	return defaultCNIAssetK8s1_5, defaultCNIAssetHashStringK8s1_5, nil
+	u, err := url.Parse(cniAsset)
+	if err != nil {
+		return nil, nil, nil
+	}
+
+	hash, err := hashing.FromString(cniAssetHash)
+	if err != nil {
+		return nil, nil, fmt.Errorf("unable to parse CNI asset hash %q", cniAssetHash)
+	}
+
+	u, err = assetBuilder.RemapFileAndSHAValue(u, cniAssetHash)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return u, hash, nil
 }

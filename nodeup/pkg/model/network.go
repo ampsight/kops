@@ -18,9 +18,10 @@ package model
 
 import (
 	"fmt"
+	"path/filepath"
+
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/nodeup/nodetasks"
-	"path/filepath"
 )
 
 // NetworkBuilder writes CNI assets
@@ -30,19 +31,26 @@ type NetworkBuilder struct {
 
 var _ fi.ModelBuilder = &NetworkBuilder{}
 
+// Build is responsible for configuring the network cni
 func (b *NetworkBuilder) Build(c *fi.ModelBuilderContext) error {
 	var assetNames []string
 
+	// @TODO need to clean up this code, it isn't the easiest to read
 	networking := b.Cluster.Spec.Networking
 	if networking == nil || networking.Classic != nil {
-	} else if networking.Kubenet != nil {
+	} else if networking.Kubenet != nil || networking.GCE != nil {
 		assetNames = append(assetNames, "bridge", "host-local", "loopback")
 	} else if networking.External != nil {
 		// external is based on kubenet
 		assetNames = append(assetNames, "bridge", "host-local", "loopback")
-	} else if networking.CNI != nil || networking.Weave != nil || networking.Flannel != nil || networking.Calico != nil || networking.Canal != nil || networking.Kuberouter != nil {
+
+	} else if networking.CNI != nil || networking.Weave != nil || networking.Flannel != nil || networking.Calico != nil || networking.Canal != nil || networking.Kuberouter != nil || networking.Romana != nil || networking.AmazonVPC != nil || networking.Cilium != nil {
 		assetNames = append(assetNames, "bridge", "host-local", "loopback", "ptp")
 		// Do we need tuning?
+
+		if b.IsKubernetesGTE("1.9") {
+			assetNames = append(assetNames, "portmap")
+		}
 
 		// TODO: Only when using flannel ?
 		assetNames = append(assetNames, "flannel")
@@ -50,6 +58,8 @@ func (b *NetworkBuilder) Build(c *fi.ModelBuilderContext) error {
 		// TODO combine with External
 		// Kopeio is based on kubenet / external
 		assetNames = append(assetNames, "bridge", "host-local", "loopback")
+	} else if networking.LyftVPC != nil {
+		assetNames = append(assetNames, "cni-ipvlan-vpc-k8s-ipam", "cni-ipvlan-vpc-k8s-ipvlan", "cni-ipvlan-vpc-k8s-tool", "cni-ipvlan-vpc-k8s-unnumbered-ptp", "loopback")
 	} else {
 		return fmt.Errorf("no networking mode set")
 	}
@@ -73,13 +83,12 @@ func (b *NetworkBuilder) addCNIBinAsset(c *fi.ModelBuilderContext, assetName str
 		return fmt.Errorf("unable to locate asset %q", assetName)
 	}
 
-	t := &nodetasks.File{
+	c.AddTask(&nodetasks.File{
 		Path:     filepath.Join(b.CNIBinDir(), assetName),
 		Contents: asset,
 		Type:     nodetasks.FileType_File,
 		Mode:     s("0755"),
-	}
-	c.AddTask(t)
+	})
 
 	return nil
 }

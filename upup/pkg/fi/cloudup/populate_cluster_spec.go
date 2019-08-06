@@ -23,34 +23,32 @@ import (
 	"strings"
 	"text/template"
 
-	"github.com/golang/glog"
+	"k8s.io/klog"
 
 	api "k8s.io/kops/pkg/apis/kops"
-	"k8s.io/kops/pkg/apis/kops/registry"
 	"k8s.io/kops/pkg/apis/kops/util"
 	"k8s.io/kops/pkg/apis/kops/validation"
 	"k8s.io/kops/pkg/assets"
+	"k8s.io/kops/pkg/client/simple"
 	"k8s.io/kops/pkg/dns"
 	"k8s.io/kops/pkg/model"
 	"k8s.io/kops/pkg/model/components"
+	"k8s.io/kops/pkg/model/components/etcdmanager"
+	nodeauthorizer "k8s.io/kops/pkg/model/components/node-authorizer"
 	"k8s.io/kops/upup/models"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/loader"
-	"k8s.io/kops/upup/pkg/fi/utils"
+	"k8s.io/kops/util/pkg/reflectutils"
 	"k8s.io/kops/util/pkg/vfs"
 )
 
+// EtcdClusters is a list of the etcd clusters kops creates
 var EtcdClusters = []string{"main", "events"}
 
 type populateClusterSpec struct {
 	// InputCluster is the api object representing the whole cluster, as input by the user
 	// We build it up into a complete config, but we write the values as input
 	InputCluster *api.Cluster
-
-	// ModelStore is the location where models are found
-	ModelStore vfs.Path
-	// Models is a list of cloudup models to apply
-	Models []string
 
 	// fullCluster holds the built completed cluster spec
 	fullCluster *api.Cluster
@@ -66,19 +64,12 @@ func findModelStore() (vfs.Path, error) {
 
 // PopulateClusterSpec takes a user-specified cluster spec, and computes the full specification that should be set on the cluster.
 // We do this so that we don't need any real "brains" on the node side.
-func PopulateClusterSpec(cluster *api.Cluster, assetBuilder *assets.AssetBuilder) (*api.Cluster, error) {
-	modelStore, err := findModelStore()
-	if err != nil {
-		return nil, err
-	}
-
+func PopulateClusterSpec(clientset simple.Clientset, cluster *api.Cluster, assetBuilder *assets.AssetBuilder) (*api.Cluster, error) {
 	c := &populateClusterSpec{
 		InputCluster: cluster,
-		ModelStore:   modelStore,
-		Models:       []string{"config"},
 		assetBuilder: assetBuilder,
 	}
-	err = c.run()
+	err := c.run(clientset)
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +86,7 @@ func PopulateClusterSpec(cluster *api.Cluster, assetBuilder *assets.AssetBuilder
 // struct is falling through..
 // @kris-nova
 //
-func (c *populateClusterSpec) run() error {
+func (c *populateClusterSpec) run(clientset simple.Clientset) error {
 	if err := validation.ValidateCluster(c.InputCluster, false); err != nil {
 		return err
 	}
@@ -103,7 +94,7 @@ func (c *populateClusterSpec) run() error {
 	// Copy cluster & instance groups, so we can modify them freely
 	cluster := &api.Cluster{}
 
-	utils.JsonMergeStruct(cluster, c.InputCluster)
+	reflectutils.JsonMergeStruct(cluster, c.InputCluster)
 
 	err := c.assignSubnets(cluster)
 	if err != nil {
@@ -160,49 +151,22 @@ func (c *populateClusterSpec) run() error {
 					instanceGroupName := fi.StringValue(m.InstanceGroup)
 
 					if etcdInstanceGroups[instanceGroupName] != nil {
-						glog.Warningf("EtcdMembers are in the same InstanceGroup %q in etcd-cluster %q (fault-tolerance may be reduced)", instanceGroupName, etcd.Name)
+						klog.Warningf("EtcdMembers are in the same InstanceGroup %q in etcd-cluster %q (fault-tolerance may be reduced)", instanceGroupName, etcd.Name)
 					}
 
 					//if clusterSubnets[zone] == nil {
 					//	return fmt.Errorf("EtcdMembers for %q is configured in zone %q, but that is not configured at the k8s-cluster level", etcd.Name, m.Zone)
 					//}
+					etcdNames[m.Name] = m
 					etcdInstanceGroups[instanceGroupName] = m
 				}
 
-				if (len(etcdInstanceGroups) % 2) == 0 {
+				if (len(etcdNames) % 2) == 0 {
 					// Not technically a requirement, but doesn't really make sense to allow
-					return fmt.Errorf("There should be an odd number of master-zones, for etcd's quorum.  Hint: Use --zones and --master-zones to declare node zones and master zones separately.")
+					return fmt.Errorf("there should be an odd number of master-zones, for etcd's quorum.  Hint: Use --zones and --master-zones to declare node zones and master zones separately")
 				}
 			}
 		}
-	}
-
-	keyStore, err := registry.KeyStore(cluster)
-	if err != nil {
-		return err
-	}
-	// Always assume a dry run during this phase
-	keyStore.(*fi.VFSCAStore).DryRun = true
-
-	secretStore, err := registry.SecretStore(cluster)
-	if err != nil {
-		return err
-	}
-
-	if vfs.IsClusterReadable(secretStore.VFSPath()) {
-		vfsPath := secretStore.VFSPath()
-		cluster.Spec.SecretStore = vfsPath.Path()
-	} else {
-		// We could implement this approach, but it seems better to get all clouds using cluster-readable storage
-		return fmt.Errorf("secrets path is not cluster readable: %v", secretStore.VFSPath())
-	}
-
-	if vfs.IsClusterReadable(keyStore.VFSPath()) {
-		vfsPath := keyStore.VFSPath()
-		cluster.Spec.KeyStore = vfsPath.Path()
-	} else {
-		// We could implement this approach, but it seems better to get all clouds using cluster-readable storage
-		return fmt.Errorf("keyStore path is not cluster readable: %v", keyStore.VFSPath())
 	}
 
 	configBase, err := vfs.Context.BuildVfsPath(cluster.Spec.ConfigBase)
@@ -216,13 +180,53 @@ func (c *populateClusterSpec) run() error {
 		return fmt.Errorf("ConfigBase path is not cluster readable: %v", cluster.Spec.ConfigBase)
 	}
 
+	keyStore, err := clientset.KeyStore(cluster)
+	if err != nil {
+		return err
+	}
+
+	if cluster.Spec.KeyStore == "" {
+		hasVFSPath, ok := keyStore.(fi.HasVFSPath)
+		if !ok {
+			// We will mirror to ConfigBase
+			basedir := configBase.Join("pki")
+			cluster.Spec.KeyStore = basedir.Path()
+		} else if vfs.IsClusterReadable(hasVFSPath.VFSPath()) {
+			vfsPath := hasVFSPath.VFSPath()
+			cluster.Spec.KeyStore = vfsPath.Path()
+		} else {
+			// We could implement this approach, but it seems better to get all clouds using cluster-readable storage
+			return fmt.Errorf("keyStore path is not cluster readable: %v", hasVFSPath.VFSPath())
+		}
+	}
+
+	secretStore, err := clientset.SecretStore(cluster)
+	if err != nil {
+		return err
+	}
+
+	if cluster.Spec.SecretStore == "" {
+		hasVFSPath, ok := secretStore.(fi.HasVFSPath)
+		if !ok {
+			// We will mirror to ConfigBase
+			basedir := configBase.Join("secrets")
+			cluster.Spec.SecretStore = basedir.Path()
+		} else if vfs.IsClusterReadable(hasVFSPath.VFSPath()) {
+			vfsPath := hasVFSPath.VFSPath()
+			cluster.Spec.SecretStore = vfsPath.Path()
+		} else {
+			// We could implement this approach, but it seems better to get all clouds using cluster-readable storage
+			return fmt.Errorf("secrets path is not cluster readable: %v", hasVFSPath.VFSPath())
+		}
+	}
+
 	// Normalize k8s version
 	versionWithoutV := strings.TrimSpace(cluster.Spec.KubernetesVersion)
 	if strings.HasPrefix(versionWithoutV, "v") {
 		versionWithoutV = versionWithoutV[1:]
 	}
 	if cluster.Spec.KubernetesVersion != versionWithoutV {
-		glog.V(2).Infof("Normalizing kubernetes version: %q -> %q", cluster.Spec.KubernetesVersion, versionWithoutV)
+		klog.V(2).Infof("Normalizing kubernetes version: %q -> %q", cluster.Spec.KubernetesVersion, versionWithoutV)
 		cluster.Spec.KubernetesVersion = versionWithoutV
 	}
 	cloud, err := BuildCloud(cluster)
@@ -246,7 +250,7 @@ func (c *populateClusterSpec) run() error {
 			return fmt.Errorf("error determining default DNS zone: %v", err)
 		}
 
-		glog.V(2).Infof("Defaulting DNS zone to: %s", dnsZone)
+		klog.V(2).Infof("Defaulting DNS zone to: %s", dnsZone)
 		cluster.Spec.DNSZone = dnsZone
 	}
 
@@ -267,7 +271,10 @@ func (c *populateClusterSpec) run() error {
 
 	templateFunctions := make(template.FuncMap)
 
-	tf.AddTo(templateFunctions)
+	err = tf.AddTo(templateFunctions, secretStore)
+	if err != nil {
+		return err
+	}
 
 	if cluster.Spec.KubernetesVersion == "" {
 		return fmt.Errorf("KubernetesVersion is required")
@@ -283,26 +290,22 @@ func (c *populateClusterSpec) run() error {
 		AssetBuilder:      c.assetBuilder,
 	}
 
-	var fileModels []string
 	var codeModels []loader.OptionsBuilder
-	for _, m := range c.Models {
-		switch m {
-		case "config":
+	{
+		{
 			// Note: DefaultOptionsBuilder comes first
 			codeModels = append(codeModels, &components.DefaultsOptionsBuilder{Context: optionsContext})
-			codeModels = append(codeModels, &components.EtcdOptionsBuilder{Context: optionsContext})
+			codeModels = append(codeModels, &components.EtcdOptionsBuilder{OptionsContext: optionsContext})
+			codeModels = append(codeModels, &etcdmanager.EtcdManagerOptionsBuilder{OptionsContext: optionsContext})
+			codeModels = append(codeModels, &nodeauthorizer.OptionsBuilder{Context: optionsContext})
 			codeModels = append(codeModels, &components.KubeAPIServerOptionsBuilder{OptionsContext: optionsContext})
-			codeModels = append(codeModels, &components.DockerOptionsBuilder{Context: optionsContext})
+			codeModels = append(codeModels, &components.DockerOptionsBuilder{OptionsContext: optionsContext})
 			codeModels = append(codeModels, &components.NetworkingOptionsBuilder{Context: optionsContext})
 			codeModels = append(codeModels, &components.KubeDnsOptionsBuilder{Context: optionsContext})
 			codeModels = append(codeModels, &components.KubeletOptionsBuilder{Context: optionsContext})
 			codeModels = append(codeModels, &components.KubeControllerManagerOptionsBuilder{Context: optionsContext})
 			codeModels = append(codeModels, &components.KubeSchedulerOptionsBuilder{OptionsContext: optionsContext})
 			codeModels = append(codeModels, &components.KubeProxyOptionsBuilder{Context: optionsContext})
-			fileModels = append(fileModels, m)
-
-		default:
-			fileModels = append(fileModels, m)
 		}
 	}
 
@@ -311,7 +314,7 @@ func (c *populateClusterSpec) run() error {
 		Tags:          tags,
 	}
 
-	completed, err := specBuilder.BuildCompleteSpec(&cluster.Spec, c.ModelStore, fileModels)
+	completed, err := specBuilder.BuildCompleteSpec(&cluster.Spec)
 	if err != nil {
 		return fmt.Errorf("error building complete spec: %v", err)
 	}
@@ -335,7 +338,7 @@ func (c *populateClusterSpec) run() error {
 
 func (c *populateClusterSpec) assignSubnets(cluster *api.Cluster) error {
 	if cluster.Spec.NonMasqueradeCIDR == "" {
-		glog.Warningf("NonMasqueradeCIDR not set; can't auto-assign dependent subnets")
+		klog.Warningf("NonMasqueradeCIDR not set; can't auto-assign dependent subnets")
 		return nil
 	}
 
@@ -365,14 +368,14 @@ func (c *populateClusterSpec) assignSubnets(cluster *api.Cluster) error {
 
 		cidr := net.IPNet{IP: ip, Mask: net.CIDRMask(nmOnes+1, nmBits)}
 		cluster.Spec.KubeControllerManager.ClusterCIDR = cidr.String()
-		glog.V(2).Infof("Defaulted KubeControllerManager.ClusterCIDR to %v", cluster.Spec.KubeControllerManager.ClusterCIDR)
+		klog.V(2).Infof("Defaulted KubeControllerManager.ClusterCIDR to %v", cluster.Spec.KubeControllerManager.ClusterCIDR)
 	}
 
 	if cluster.Spec.ServiceClusterIPRange == "" {
 		// Allocate from the '0' subnet; but only carve off 1/4 of that (i.e. add 1 + 2 bits to the netmask)
 		cidr := net.IPNet{IP: nonMasqueradeCIDR.IP.Mask(nonMasqueradeCIDR.Mask), Mask: net.CIDRMask(nmOnes+3, nmBits)}
 		cluster.Spec.ServiceClusterIPRange = cidr.String()
-		glog.V(2).Infof("Defaulted ServiceClusterIPRange to %v", cluster.Spec.ServiceClusterIPRange)
+		klog.V(2).Infof("Defaulted ServiceClusterIPRange to %v", cluster.Spec.ServiceClusterIPRange)
 	}
 
 	return nil

@@ -20,16 +20,17 @@ import (
 	"fmt"
 
 	"encoding/json"
+	"net/url"
+
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/service/iam"
-	"github.com/golang/glog"
+	"k8s.io/klog"
 	"k8s.io/kops/pkg/diff"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
 	"k8s.io/kops/upup/pkg/fi/cloudup/cloudformation"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraform"
-	"net/url"
 )
 
 //go:generate fitask -type=IAMRolePolicy
@@ -74,7 +75,7 @@ func (e *IAMRolePolicy) Find(c *fi.Context) (*IAMRolePolicy, error) {
 		policy := *p.PolicyDocument
 		policy, err = url.QueryUnescape(policy)
 		if err != nil {
-			return nil, fmt.Errorf("error parsing PolicyDocument for IAMRolePolicy %q: %v", e.Name, err)
+			return nil, fmt.Errorf("error parsing PolicyDocument for IAMRolePolicy %q: %v", aws.StringValue(e.Name), err)
 		}
 		actual.PolicyDocument = fi.WrapResource(fi.NewStringResource(policy))
 	}
@@ -127,12 +128,12 @@ func (_ *IAMRolePolicy) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *IAMRoleP
 		request.RoleName = e.Role.Name
 		request.PolicyName = e.Name
 
-		glog.V(2).Infof("Deleting role policy %s/%s", aws.StringValue(e.Role.Name), aws.StringValue(e.Name))
+		klog.V(2).Infof("Deleting role policy %s/%s", aws.StringValue(e.Role.Name), aws.StringValue(e.Name))
 		_, err = t.Cloud.IAM().DeleteRolePolicy(request)
 		if err != nil {
 			if awsup.AWSErrorCode(err) == "NoSuchEntity" {
 				// Already deleted
-				glog.V(2).Infof("Got NoSuchEntity deleting role policy %s/%s; assuming does not exist", aws.StringValue(e.Role.Name), aws.StringValue(e.Name))
+				klog.V(2).Infof("Got NoSuchEntity deleting role policy %s/%s; assuming does not exist", aws.StringValue(e.Role.Name), aws.StringValue(e.Name))
 				return nil
 			}
 			return fmt.Errorf("error deleting IAMRolePolicy: %v", err)
@@ -143,11 +144,11 @@ func (_ *IAMRolePolicy) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *IAMRoleP
 	doPut := false
 
 	if a == nil {
-		glog.V(2).Infof("Creating IAMRolePolicy")
+		klog.V(2).Infof("Creating IAMRolePolicy")
 		doPut = true
 	} else if changes != nil {
 		if changes.PolicyDocument != nil {
-			glog.V(2).Infof("Applying changed role policy to %q:", *e.Name)
+			klog.V(2).Infof("Applying changed role policy to %q:", *e.Name)
 
 			actualPolicy, err := a.policyDocumentString()
 			if err != nil {
@@ -155,10 +156,10 @@ func (_ *IAMRolePolicy) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *IAMRoleP
 			}
 
 			if actualPolicy == policy {
-				glog.Warning("Policies were actually the same")
+				klog.Warning("Policies were actually the same")
 			} else {
 				d := diff.FormatDiff(actualPolicy, policy)
-				glog.V(2).Infof("diff: %s", d)
+				klog.V(2).Infof("diff: %s", d)
 			}
 
 			doPut = true
@@ -171,7 +172,7 @@ func (_ *IAMRolePolicy) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *IAMRoleP
 		request.RoleName = e.Role.Name
 		request.PolicyName = e.Name
 
-		glog.V(8).Infof("PutRolePolicy RoleName=%s PolicyName=%s: %s", aws.StringValue(e.Role.Name), aws.StringValue(e.Name), policy)
+		klog.V(8).Infof("PutRolePolicy RoleName=%s PolicyName=%s: %s", aws.StringValue(e.Role.Name), aws.StringValue(e.Name), policy)
 
 		_, err = t.Cloud.IAM().PutRolePolicy(request)
 		if err != nil {

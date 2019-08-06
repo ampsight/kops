@@ -18,12 +18,13 @@ package gcetasks
 
 import (
 	"fmt"
-	"github.com/golang/glog"
+	"reflect"
+
 	compute "google.golang.org/api/compute/v0.beta"
+	"k8s.io/klog"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/gce"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraform"
-	"reflect"
 )
 
 // Disk represents a GCE PD
@@ -62,6 +63,9 @@ func (e *Disk) Find(c *fi.Context) (*Disk, error) {
 	actual.SizeGB = &r.SizeGb
 
 	actual.Labels = r.Labels
+
+	// Ignore "system" fields
+	actual.Lifecycle = e.Lifecycle
 
 	return actual, nil
 }
@@ -142,7 +146,7 @@ func (_ *Disk) RenderGCE(t *gce.GCEAPITarget, a, e, changes *Disk) error {
 		for k, v := range e.Labels {
 			labelsRequest.Labels[k] = v
 		}
-		glog.V(2).Infof("Setting labels on disk %q: %v", disk.Name, labelsRequest.Labels)
+		klog.V(2).Infof("Setting labels on disk %q: %v", disk.Name, labelsRequest.Labels)
 		_, err = t.Cloud.Compute().Disks.SetLabels(t.Cloud.Project(), *e.Zone, disk.Name, labelsRequest).Do()
 		if err != nil {
 			return fmt.Errorf("error setting labels on created Disk: %v", err)
@@ -161,18 +165,30 @@ func (_ *Disk) RenderGCE(t *gce.GCEAPITarget, a, e, changes *Disk) error {
 }
 
 type terraformDisk struct {
-	Name       *string `json:"name"`
-	VolumeType *string `json:"type"`
-	SizeGB     *int64  `json:"size"`
-	Zone       *string `json:"zone"`
+	Name       *string           `json:"name"`
+	VolumeType *string           `json:"type"`
+	SizeGB     *int64            `json:"size"`
+	Zone       *string           `json:"zone"`
+	Labels     map[string]string `json:"labels,omitempty"`
 }
 
 func (_ *Disk) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *Disk) error {
+	cloud := t.Cloud.(gce.GCECloud)
+
+	labels := make(map[string]string)
+	for k, v := range cloud.Labels() {
+		labels[k] = v
+	}
+	for k, v := range e.Labels {
+		labels[k] = v
+	}
+
 	tf := &terraformDisk{
 		Name:       e.Name,
 		VolumeType: e.VolumeType,
 		SizeGB:     e.SizeGB,
 		Zone:       e.Zone,
+		Labels:     labels,
 	}
 	return t.RenderResource("google_compute_disk", *e.Name, tf)
 }

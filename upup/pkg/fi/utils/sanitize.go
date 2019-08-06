@@ -18,10 +18,12 @@ package utils
 
 import (
 	"bytes"
-	"os"
 	"strings"
+
+	"k8s.io/client-go/util/homedir"
 )
 
+// SanitizeString iterated a strings and removes any characters not in the allow list
 func SanitizeString(s string) string {
 	var out bytes.Buffer
 	allowed := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
@@ -32,13 +34,15 @@ func SanitizeString(s string) string {
 			out.WriteRune('_')
 		}
 	}
+
 	return string(out.Bytes())
 }
 
 // ExpandPath replaces common path aliases: ~ -> $HOME
 func ExpandPath(p string) string {
 	if strings.HasPrefix(p, "~/") {
-		p = os.Getenv("HOME") + p[1:]
+		p = homedir.HomeDir() + p[1:]
 	}
+
 	return p
 }

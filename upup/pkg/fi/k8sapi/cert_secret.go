@@ -18,7 +18,8 @@ package k8sapi
 
 import (
 	"fmt"
-	"k8s.io/client-go/pkg/api/v1"
+
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/kops/pkg/pki"
 )
 
@@ -39,7 +40,7 @@ func ParseKeypairSecret(secret *v1.Secret) (*KeypairSecret, error) {
 
 	certData := secret.Data[v1.TLSCertKey]
 	if certData != nil {
-		cert, err := pki.LoadPEMCertificate(certData)
+		cert, err := pki.ParsePEMCertificate(certData)
 		if err != nil {
 			return nil, fmt.Errorf("error parsing certificate in %s/%s: %q", k.Namespace, k.Name, err)
 		}

@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors.
+Copyright 2018 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,10 +26,10 @@ import (
 
 // NatGateway
 
-// JSON marshalling boilerplate
+// JSON marshaling boilerplate
 type realNatGateway NatGateway
 
-// UnmarshalJSON implements conversion to JSON, supporitng an alternate specification of the object as a string
+// UnmarshalJSON implements conversion to JSON, supporting an alternate specification of the object as a string
 func (o *NatGateway) UnmarshalJSON(data []byte) error {
 	var jsonName string
 	if err := json.Unmarshal(data, &jsonName); err == nil {
@@ -50,6 +50,11 @@ var _ fi.HasLifecycle = &NatGateway{}
 // GetLifecycle returns the Lifecycle of the object, implementing fi.HasLifecycle
 func (o *NatGateway) GetLifecycle() *fi.Lifecycle {
 	return o.Lifecycle
+}
+
+// SetLifecycle sets the Lifecycle of the object, implementing fi.SetLifecycle
+func (o *NatGateway) SetLifecycle(lifecycle fi.Lifecycle) {
+	o.Lifecycle = &lifecycle
 }
 
 var _ fi.HasName = &NatGateway{}

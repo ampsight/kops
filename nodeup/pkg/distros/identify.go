@@ -18,11 +18,12 @@ package distros
 
 import (
 	"fmt"
-	"github.com/golang/glog"
 	"io/ioutil"
 	"os"
 	"path"
 	"strings"
+
+	"k8s.io/klog"
 )
 
 // FindDistribution identifies the distribution on which we are running
@@ -35,11 +36,14 @@ func FindDistribution(rootfs string) (Distribution, error) {
 			line = strings.TrimSpace(line)
 			if line == "DISTRIB_CODENAME=xenial" {
 				return DistributionXenial, nil
+			} else if line == "DISTRIB_CODENAME=bionic" {
+				klog.Warningf("bionic is not fully supported nor tested for Kops and Kubernetes")
+				klog.Warningf("this should only be used for testing purposes.")
+				return DistributionBionic, nil
 			}
 		}
-		glog.Warningf("unhandled lsb-release info %q", string(lsbRelease))
 	} else if !os.IsNotExist(err) {
-		glog.Warningf("error reading /etc/lsb-release: %v", err)
+		klog.Warningf("error reading /etc/lsb-release: %v", err)
 	}
 
 	// Debian has /etc/debian_version
@@ -48,11 +52,15 @@ func FindDistribution(rootfs string) (Distribution, error) {
 		debianVersion := strings.TrimSpace(string(debianVersionBytes))
 		if strings.HasPrefix(debianVersion, "8.") {
 			return DistributionJessie, nil
+		} else if strings.HasPrefix(debianVersion, "9.") {
+			return DistributionDebian9, nil
+		} else if strings.HasPrefix(debianVersion, "10.") {
+			return DistributionDebian10, nil
 		} else {
 			return "", fmt.Errorf("unhandled debian version %q", debianVersion)
 		}
 	} else if !os.IsNotExist(err) {
-		glog.Warningf("error reading /etc/debian_version: %v", err)
+		klog.Warningf("error reading /etc/debian_version: %v", err)
 	}
 
 	// Redhat has /etc/redhat-release
@@ -67,41 +75,58 @@ func FindDistribution(rootfs string) (Distribution, error) {
 			if strings.HasPrefix(line, "CentOS Linux release 7.") {
 				return DistributionCentos7, nil
 			}
+			if strings.HasPrefix(line, "Red Hat Enterprise Linux release 8.") {
+				return DistributionRhel8, nil
+			}
+			if strings.HasPrefix(line, "CentOS Linux release 8.") {
+				return DistributionCentos8, nil
+			}
 		}
-		glog.Warningf("unhandled redhat-release info %q", string(lsbRelease))
+		klog.Warningf("unhandled redhat-release info %q", string(lsbRelease))
 	} else if !os.IsNotExist(err) {
-		glog.Warningf("error reading /etc/redhat-release: %v", err)
+		klog.Warningf("error reading /etc/redhat-release: %v", err)
 	}
 
 	// CoreOS uses /usr/lib/os-release
-	osRelease, err := ioutil.ReadFile(path.Join(rootfs, "usr/lib/os-release"))
+	// Flatcar uses /usr/lib/os-release
+	usrLibOsRelease, err := ioutil.ReadFile(path.Join(rootfs, "usr/lib/os-release"))
 	if err == nil {
-		for _, line := range strings.Split(string(osRelease), "\n") {
+		for _, line := range strings.Split(string(usrLibOsRelease), "\n") {
 			line = strings.TrimSpace(line)
 			if line == "ID=coreos" {
 				return DistributionCoreOS, nil
+			} else if line == "ID=flatcar" {
+				return DistributionFlatcar, nil
 			}
 		}
-		glog.Warningf("unhandled os-release info %q", string(osRelease))
+		klog.Warningf("unhandled os-release info %q", string(usrLibOsRelease))
 	} else if !os.IsNotExist(err) {
-		glog.Warningf("error reading /usr/lib/os-release: %v", err)
+		klog.Warningf("error reading /usr/lib/os-release: %v", err)
 	}
 
-	// ContainerOS uses /etc/os-release
-	{
-		osRelease, err := ioutil.ReadFile(path.Join(rootfs, "etc/os-release"))
-		if err == nil {
-			for _, line := range strings.Split(string(osRelease), "\n") {
-				line = strings.TrimSpace(line)
-				if line == "ID=cos" {
-					return DistributionContainerOS, nil
-				}
+	// ContainerOS, Amazon Linux 2 uses /etc/os-release
+	osRelease, err := ioutil.ReadFile(path.Join(rootfs, "etc/os-release"))
+	if err == nil {
+		for _, line := range strings.Split(string(osRelease), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "ID=cos" {
+				return DistributionContainerOS, nil
 			}
-			glog.Warningf("unhandled /etc/os-release info %q", string(osRelease))
-		} else if !os.IsNotExist(err) {
-			glog.Warningf("error reading /etc/os-release: %v", err)
+			if strings.HasPrefix(line, "PRETTY_NAME=\"Amazon Linux 2") {
+				return DistributionCentos7, nil
+			}
 		}
+		klog.Warningf("unhandled /etc/os-release info %q", string(osRelease))
+	} else if !os.IsNotExist(err) {
+		klog.Warningf("error reading /etc/os-release: %v", err)
 	}
+
+	klog.Warningf("could not determine distro")
+	klog.Warningf("  /etc/lsb-release: %q", string(lsbRelease))
+	klog.Warningf("  /etc/debian_version: %q", string(debianVersionBytes))
+	klog.Warningf("  /etc/redhat-release: %q", string(redhatRelease))
+	klog.Warningf("  /usr/lib/os-release: %q", string(usrLibOsRelease))
+	klog.Warningf("  /etc/os-release: %q", string(osRelease))
 
 	return "", fmt.Errorf("cannot identify distro")
 }

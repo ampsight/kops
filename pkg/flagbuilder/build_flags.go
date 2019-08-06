@@ -24,29 +24,41 @@ import (
 	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/kops/upup/pkg/fi/utils"
 
-	"github.com/golang/glog"
+	"k8s.io/klog"
+
+	"k8s.io/kops/util/pkg/reflectutils"
 )
 
-// BuildFlags builds flag arguments based on "flag" tags on the structure
+// BuildFlags returns a space separated list arguments
+// @deprecated: please use BuildFlagsList
 func BuildFlags(options interface{}) (string, error) {
+	flags, err := BuildFlagsList(options)
+	if err != nil {
+		return "", err
+	}
+
+	return strings.Join(flags, " "), nil
+}
+
+// BuildFlagsList reflects the options interface and extracts the flags from struct tags
+func BuildFlagsList(options interface{}) ([]string, error) {
 	var flags []string
 
 	walker := func(path string, field *reflect.StructField, val reflect.Value) error {
 		if field == nil {
-			glog.V(8).Infof("ignoring non-field: %s", path)
+			klog.V(8).Infof("ignoring non-field: %s", path)
 			return nil
 		}
 		tag := field.Tag.Get("flag")
 		if tag == "" {
-			glog.V(4).Infof("not writing field with no flag tag: %s", path)
+			klog.V(4).Infof("not writing field with no flag tag: %s", path)
 			// We want to descend - it could be a structure containing flags
 			return nil
 		}
 		if tag == "-" {
-			glog.V(4).Infof("skipping field with %q flag tag: %s", tag, path)
-			return utils.SkipReflection
+			klog.V(4).Infof("skipping field with %q flag tag: %s", tag, path)
+			return reflectutils.SkipReflection
 		}
 
 		// If we specify the repeat option, we will repeat the flag rather than joining it with commas
@@ -98,7 +110,7 @@ func BuildFlags(options interface{}) (string, error) {
 					flag := fmt.Sprintf("--%s=%s", flagName, strings.Join(args, ","))
 					flags = append(flags, flag)
 				}
-				return utils.SkipReflection
+				return reflectutils.SkipReflection
 			}
 
 			return fmt.Errorf("BuildFlags of value type not handled: %T %s=%v", val.Interface(), path, val.Interface())
@@ -121,7 +133,7 @@ func BuildFlags(options interface{}) (string, error) {
 						flags = append(flags, flag)
 					}
 				}
-				return utils.SkipReflection
+				return reflectutils.SkipReflection
 			}
 
 			return fmt.Errorf("BuildFlags of value type not handled: %T %s=%v", val.Interface(), path, val.Interface())
@@ -171,20 +183,20 @@ func BuildFlags(options interface{}) (string, error) {
 			}
 
 		default:
-			return fmt.Errorf("BuildFlags of value type not handled: %T %s=%v", v, path, v)
+			return fmt.Errorf("BuildFlagsList of value type not handled: %T %s=%v", v, path, v)
 		}
 		if flag != "" {
 			flags = append(flags, flag)
 		}
-		// Nothing more to do here
-		return utils.SkipReflection
+
+		return reflectutils.SkipReflection
 	}
-	err := utils.ReflectRecursive(reflect.ValueOf(options), walker)
+	err := reflectutils.ReflectRecursive(reflect.ValueOf(options), walker)
 	if err != nil {
-		return "", err
+		return nil, fmt.Errorf("BuildFlagsList to reflect value: %s", err)
 	}
 	// Sort so that the order is stable across runs
 	sort.Strings(flags)
 
-	return strings.Join(flags, " "), nil
+	return flags, nil
 }

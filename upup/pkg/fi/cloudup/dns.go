@@ -18,18 +18,19 @@ package cloudup
 
 import (
 	"fmt"
-	"github.com/golang/glog"
+	"net"
+	"os"
+	"strings"
+
+	"k8s.io/klog"
 	"k8s.io/kops/dns-controller/pkg/dns"
+	"k8s.io/kops/dnsprovider/pkg/dnsprovider"
+	"k8s.io/kops/dnsprovider/pkg/dnsprovider/rrstype"
 	"k8s.io/kops/pkg/apis/kops"
 	kopsdns "k8s.io/kops/pkg/dns"
 	"k8s.io/kops/pkg/featureflag"
 	"k8s.io/kops/pkg/model"
 	"k8s.io/kops/upup/pkg/fi"
-	"k8s.io/kubernetes/federation/pkg/dnsprovider"
-	"k8s.io/kubernetes/federation/pkg/dnsprovider/rrstype"
-	"net"
-	"os"
-	"strings"
 )
 
 const (
@@ -37,6 +38,8 @@ const (
 	// https://en.wikipedia.org/wiki/Reserved_IP_addresses
 	PlaceholderIP  = "203.0.113.123"
 	PlaceholderTTL = 10
+	// DigitalOcean's DNS servers require a certain minimum TTL (it's 30), keeping 60 here.
+	PlaceholderTTLDigitialOcean = 60
 )
 
 func findZone(cluster *kops.Cluster, cloud fi.Cloud) (dnsprovider.Zone, error) {
@@ -69,10 +72,10 @@ func findZone(cluster *kops.Cluster, cloud fi.Cloud) (dnsprovider.Zone, error) {
 	}
 
 	if len(matches) > 1 {
-		glog.Infof("Found multiple DNS Zones matching %q, please specify --dns-zone=<id> to indicate the one you want", cluster.Spec.DNSZone)
+		klog.Infof("Found multiple DNS Zones matching %q, please specify --dns-zone=<id> to indicate the one you want", cluster.Spec.DNSZone)
 		for _, zone := range zones {
 			id := zone.ID()
-			glog.Infof("\t--dns-zone=%s", id)
+			klog.Infof("\t--dns-zone=%s", id)
 		}
 		return nil, fmt.Errorf("found multiple DNS Zones matching %q", cluster.Spec.DNSZone)
 	}
@@ -88,7 +91,7 @@ func validateDNS(cluster *kops.Cluster, cloud fi.Cloud) error {
 	}
 
 	if kopsModelContext.UsePrivateDNS() {
-		glog.Infof("Private DNS: skipping DNS validation")
+		klog.Infof("Private DNS: skipping DNS validation")
 		return nil
 	}
 
@@ -98,7 +101,7 @@ func validateDNS(cluster *kops.Cluster, cloud fi.Cloud) error {
 	}
 	dnsName := strings.TrimSuffix(zone.Name(), ".")
 
-	glog.V(2).Infof("Doing DNS lookup to verify NS records for %q", dnsName)
+	klog.V(2).Infof("Doing DNS lookup to verify NS records for %q", dnsName)
 	ns, err := net.LookupNS(dnsName)
 	if err != nil {
 		return fmt.Errorf("error doing DNS lookup for NS records for %q: %v", dnsName, err)
@@ -108,14 +111,14 @@ func validateDNS(cluster *kops.Cluster, cloud fi.Cloud) error {
 		if os.Getenv("DNS_IGNORE_NS_CHECK") == "" {
 			return fmt.Errorf("NS records not found for %q - please make sure they are correctly configured", dnsName)
 		} else {
-			glog.Warningf("Ignoring failed NS record check because DNS_IGNORE_NS_CHECK is set")
+			klog.Warningf("Ignoring failed NS record check because DNS_IGNORE_NS_CHECK is set")
 		}
 	} else {
 		var hosts []string
 		for _, n := range ns {
 			hosts = append(hosts, n.Host)
 		}
-		glog.V(2).Infof("Found NS records for %q: %v", dnsName, hosts)
+		klog.V(2).Infof("Found NS records for %q: %v", dnsName, hosts)
 	}
 
 	return nil
@@ -124,7 +127,7 @@ func validateDNS(cluster *kops.Cluster, cloud fi.Cloud) error {
 func precreateDNS(cluster *kops.Cluster, cloud fi.Cloud) error {
 	// TODO: Move to update
 	if !featureflag.DNSPreCreate.Enabled() {
-		glog.V(4).Infof("Skipping DNS record pre-creation because feature flag not enabled")
+		klog.V(4).Infof("Skipping DNS record pre-creation because feature flag not enabled")
 		return nil
 	}
 
@@ -145,11 +148,11 @@ func precreateDNS(cluster *kops.Cluster, cloud fi.Cloud) error {
 	}
 
 	if len(dnsHostnames) == 0 {
-		glog.Infof("No DNS records to pre-create")
+		klog.Infof("No DNS records to pre-create")
 		return nil
 	}
 
-	glog.Infof("Pre-creating DNS records")
+	klog.Infof("Pre-creating DNS records")
 
 	zone, err := findZone(cluster, cloud)
 	if err != nil {
@@ -191,11 +194,11 @@ func precreateDNS(cluster *kops.Cluster, cloud fi.Cloud) error {
 			if dnsRecord != nil {
 				rrdatas := dnsRecord.Rrdatas()
 				if len(rrdatas) > 0 {
-					glog.V(4).Infof("Found DNS record %s => %s; won't create", dnsHostname, rrdatas)
+					klog.V(4).Infof("Found DNS record %s => %s; won't create", dnsHostname, rrdatas)
 					found = true
 				} else {
 					// This is probably an alias target; leave it alone...
-					glog.V(4).Infof("Found DNS record %s, but no records", dnsHostname)
+					klog.V(4).Infof("Found DNS record %s, but no records", dnsHostname)
 					found = true
 				}
 			}
@@ -206,15 +209,15 @@ func precreateDNS(cluster *kops.Cluster, cloud fi.Cloud) error {
 			}
 			for _, dnsRecord := range dnsRecords {
 				if dnsRecord.Type() != "A" {
-					glog.V(4).Infof("Found DNS record %s with type %s, continue to create A type", dnsHostname, dnsRecord.Type())
+					klog.V(4).Infof("Found DNS record %s with type %s, continue to create A type", dnsHostname, dnsRecord.Type())
 				} else {
 					rrdatas := dnsRecord.Rrdatas()
 					if len(rrdatas) > 0 {
-						glog.V(4).Infof("Found DNS record %s => %s; won't create", dnsHostname, rrdatas)
+						klog.V(4).Infof("Found DNS record %s => %s; won't create", dnsHostname, rrdatas)
 						found = true
 					} else {
 						// This is probably an alias target; leave it alone...
-						glog.V(4).Infof("Found DNS record %s, but no records", dnsHostname)
+						klog.V(4).Infof("Found DNS record %s, but no records", dnsHostname)
 						found = true
 					}
 				}
@@ -225,9 +228,14 @@ func precreateDNS(cluster *kops.Cluster, cloud fi.Cloud) error {
 			continue
 		}
 
-		glog.V(2).Infof("Pre-creating DNS record %s => %s", dnsHostname, PlaceholderIP)
+		klog.V(2).Infof("Pre-creating DNS record %s => %s", dnsHostname, PlaceholderIP)
 
-		changeset.Add(rrs.New(dnsHostname, []string{PlaceholderIP}, PlaceholderTTL, rrstype.A))
+		if cloud.ProviderID() == kops.CloudProviderDO {
+			changeset.Add(rrs.New(dnsHostname, []string{PlaceholderIP}, PlaceholderTTLDigitialOcean, rrstype.A))
+		} else {
+			changeset.Add(rrs.New(dnsHostname, []string{PlaceholderIP}, PlaceholderTTL, rrstype.A))
+		}
+
 		created = append(created, dnsHostname)
 	}
 
@@ -236,7 +244,7 @@ func precreateDNS(cluster *kops.Cluster, cloud fi.Cloud) error {
 		if err != nil {
 			return fmt.Errorf("Error pre-creating DNS records: %v", err)
 		}
-		glog.V(2).Infof("Pre-created DNS names: %v", created)
+		klog.V(2).Infof("Pre-created DNS names: %v", created)
 	}
 
 	return nil
@@ -251,16 +259,19 @@ func buildPrecreateDNSHostnames(cluster *kops.Cluster) []string {
 	if cluster.Spec.MasterPublicName != "" {
 		dnsHostnames = append(dnsHostnames, cluster.Spec.MasterPublicName)
 	} else {
-		glog.Warningf("cannot pre-create MasterPublicName - not set")
+		klog.Warningf("cannot pre-create MasterPublicName - not set")
 	}
 
 	if cluster.Spec.MasterInternalName != "" {
 		dnsHostnames = append(dnsHostnames, cluster.Spec.MasterInternalName)
 	} else {
-		glog.Warningf("cannot pre-create MasterInternalName - not set")
+		klog.Warningf("cannot pre-create MasterInternalName - not set")
 	}
 
 	for _, etcdCluster := range cluster.Spec.EtcdClusters {
+		if etcdCluster.Provider == kops.EtcdProviderTypeManager {
+			continue
+		}
 		etcClusterName := "etcd-" + etcdCluster.Name
 		if etcdCluster.Name == "main" {
 			// Special case

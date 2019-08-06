@@ -18,9 +18,10 @@ package resources
 
 import (
 	"context"
-	"github.com/golang/glog"
+
 	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/object"
+	"k8s.io/klog"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/vsphere"
 )
@@ -35,17 +36,15 @@ type clusterDiscoveryVSphere struct {
 	clusterName  string
 }
 
-type vsphereListFn func() ([]*ResourceTracker, error)
+type vsphereListFn func() ([]*Resource, error)
 
-func (c *ClusterResources) listResourcesVSphere() (map[string]*ResourceTracker, error) {
-	vsphereCloud := c.Cloud.(*vsphere.VSphereCloud)
-
-	resources := make(map[string]*ResourceTracker)
+func ListResourcesVSphere(cloud *vsphere.VSphereCloud, clusterName string) (map[string]*Resource, error) {
+	resources := make(map[string]*Resource)
 
 	d := &clusterDiscoveryVSphere{
-		cloud:        c.Cloud,
-		vsphereCloud: vsphereCloud,
-		clusterName:  c.ClusterName,
+		cloud:        cloud,
+		vsphereCloud: cloud,
+		clusterName:  clusterName,
 	}
 
 	listFunctions := []vsphereListFn{
@@ -65,7 +64,7 @@ func (c *ClusterResources) listResourcesVSphere() (map[string]*ResourceTracker, 
 	return resources, nil
 }
 
-func (d *clusterDiscoveryVSphere) listVMs() ([]*ResourceTracker, error) {
+func (d *clusterDiscoveryVSphere) listVMs() ([]*Resource, error) {
 	c := d.vsphereCloud
 
 	regexForMasterVMs := "*" + "." + "masters" + "." + d.clusterName + "*"
@@ -76,28 +75,28 @@ func (d *clusterDiscoveryVSphere) listVMs() ([]*ResourceTracker, error) {
 		if _, ok := err.(*find.NotFoundError); !ok {
 			return nil, err
 		}
-		glog.Warning(err)
+		klog.Warning(err)
 	}
 
-	var trackers []*ResourceTracker
+	var trackers []*Resource
 	for _, vm := range vms {
-		tracker := &ResourceTracker{
+		tracker := &Resource{
 			Name:    vm.Name(),
 			ID:      vm.Name(),
 			Type:    typeVM,
-			deleter: deleteVM,
+			Deleter: deleteVM,
 			Dumper:  DumpVMInfo,
-			obj:     vm,
+			Obj:     vm,
 		}
 		trackers = append(trackers, tracker)
 	}
 	return trackers, nil
 }
 
-func deleteVM(cloud fi.Cloud, r *ResourceTracker) error {
+func deleteVM(cloud fi.Cloud, r *Resource) error {
 	vsphereCloud := cloud.(*vsphere.VSphereCloud)
 
-	vm := r.obj.(*object.VirtualMachine)
+	vm := r.Obj.(*object.VirtualMachine)
 
 	task, err := vm.PowerOff(context.TODO())
 	if err != nil {
@@ -114,20 +113,21 @@ func deleteVM(cloud fi.Cloud, r *ResourceTracker) error {
 
 	err = task.Wait(context.TODO())
 	if err != nil {
-		glog.Fatalf("Destroy VM failed: %q", err)
+		klog.Fatalf("Destroy VM failed: %q", err)
 	}
 
 	return nil
 }
 
-func DumpVMInfo(r *ResourceTracker) (interface{}, error) {
+func DumpVMInfo(op *DumpOperation, r *Resource) error {
 	data := make(map[string]interface{})
 	data["id"] = r.ID
 	data["type"] = r.Type
-	data["raw"] = r.obj
-	return data, nil
+	data["raw"] = r.Obj
+	op.Dump.Resources = append(op.Dump.Resources, data)
+	return nil
 }
 
-func GetResourceTrackerKey(t *ResourceTracker) string {
+func GetResourceTrackerKey(t *Resource) string {
 	return t.Type + ":" + t.ID
 }

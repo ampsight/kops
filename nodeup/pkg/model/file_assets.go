@@ -28,11 +28,6 @@ import (
 	"k8s.io/kops/upup/pkg/fi/nodeup/nodetasks"
 )
 
-const (
-	// FileAssetsDefaultPath is the default location for assets which have no path
-	FileAssetsDefaultPath string = "/srv/kubernetes/assets"
-)
-
 // FileAssetsBuilder configures the hooks
 type FileAssetsBuilder struct {
 	*NodeupModelContext
@@ -40,16 +35,23 @@ type FileAssetsBuilder struct {
 
 var _ fi.ModelBuilder = &FileAssetsBuilder{}
 
+var templateFuncs = template.FuncMap{
+	"split": strings.Split,
+	"join":  strings.Join,
+}
+
 // Build is responsible for writing out the file assets from cluster and instanceGroup
 func (f *FileAssetsBuilder) Build(c *fi.ModelBuilderContext) error {
 	// used to keep track of previous file, so a instanceGroup can override a cluster wide one
 	tracker := make(map[string]bool, 0)
+
 	// ensure the default path exists
-	c.AddTask(&nodetasks.File{
-		Path: FileAssetsDefaultPath,
+	c.EnsureTask(&nodetasks.File{
+		Path: f.FileAssetsDefaultPath(),
 		Type: nodetasks.FileType_Directory,
 		Mode: s("0755"),
 	})
+
 	// do we have any instanceGroup file assets
 	if f.InstanceGroup.Spec.FileAssets != nil {
 		if err := f.buildFileAssets(c, f.InstanceGroup.Spec.FileAssets, tracker); err != nil {
@@ -75,7 +77,7 @@ func (f *FileAssetsBuilder) buildFileAssets(c *fi.ModelBuilderContext, assets []
 		// @check if e have a path and if not use the default path
 		assetPath := asset.Path
 		if assetPath == "" {
-			assetPath = fmt.Sprintf("%s/%s", FileAssetsDefaultPath, asset.Name)
+			assetPath = filepath.Join(f.FileAssetsDefaultPath(), asset.Name)
 		}
 		// @check if the file has already been done and skip
 		if _, found := tracker[assetPath]; found {
@@ -93,8 +95,8 @@ func (f *FileAssetsBuilder) buildFileAssets(c *fi.ModelBuilderContext, assets []
 			content = string(decoded)
 		}
 
-		// @check if the directory structure exist or create it
-		c.AddTask(&nodetasks.File{
+		// We use EnsureTask so that we don't have to check if the asset directories have already been done
+		c.EnsureTask(&nodetasks.File{
 			Path: filepath.Dir(assetPath),
 			Type: nodetasks.FileType_Directory,
 			Mode: s("0755"),
@@ -109,10 +111,4 @@ func (f *FileAssetsBuilder) buildFileAssets(c *fi.ModelBuilderContext, assets []
 	}
 
 	return nil
-}
-
-// @perhaps a path finder?
-var templateFuncs = template.FuncMap{
-	"split": strings.Split,
-	"join":  strings.Join,
 }

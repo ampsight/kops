@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors.
+Copyright 2018 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,10 +26,10 @@ import (
 
 // IAMInstanceProfile
 
-// JSON marshalling boilerplate
+// JSON marshaling boilerplate
 type realIAMInstanceProfile IAMInstanceProfile
 
-// UnmarshalJSON implements conversion to JSON, supporitng an alternate specification of the object as a string
+// UnmarshalJSON implements conversion to JSON, supporting an alternate specification of the object as a string
 func (o *IAMInstanceProfile) UnmarshalJSON(data []byte) error {
 	var jsonName string
 	if err := json.Unmarshal(data, &jsonName); err == nil {
@@ -50,6 +50,11 @@ var _ fi.HasLifecycle = &IAMInstanceProfile{}
 // GetLifecycle returns the Lifecycle of the object, implementing fi.HasLifecycle
 func (o *IAMInstanceProfile) GetLifecycle() *fi.Lifecycle {
 	return o.Lifecycle
+}
+
+// SetLifecycle sets the Lifecycle of the object, implementing fi.SetLifecycle
+func (o *IAMInstanceProfile) SetLifecycle(lifecycle fi.Lifecycle) {
+	o.Lifecycle = &lifecycle
 }
 
 var _ fi.HasName = &IAMInstanceProfile{}

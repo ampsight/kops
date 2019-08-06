@@ -1,5 +1,15 @@
+# See the OWNERS docs at https://go.k8s.io/owners
+
 approvers:
   - justinsb
-  - kris-nova
   - chrislovecnm
-  - zmerlynn
+  - andrewsykim
+  - geojaz
+  - kashifsaadat
+  - gambol99
+  - mikesplain
+  - chrisz100
+  - rdrgmnzs
+reviewers:
+  - robinpercy
+  - granular-ryanbonham

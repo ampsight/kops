@@ -18,15 +18,14 @@ package model
 
 import (
 	"fmt"
-	"path/filepath"
+	"sort"
 	"strconv"
 
-	"k8s.io/client-go/pkg/api/v1"
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/upup/pkg/fi"
-	"k8s.io/kops/upup/pkg/fi/nodeup/nodetasks"
 
-	"github.com/golang/glog"
+	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // s is a helper that builds a *string from a string value
@@ -65,81 +64,51 @@ func buildDockerEnvironmentVars(env map[string]string) []string {
 	return list
 }
 
-func getProxyEnvVars(proxies *kops.EgressProxySpec) []v1.EnvVar {
-	if proxies == nil {
-		glog.V(8).Info("proxies is == nil, returning empty list")
-		return []v1.EnvVar{}
-	}
+// sortedStrings is just a one liner helper methods
+func sortedStrings(list []string) []string {
+	sort.Strings(list)
 
-	if proxies.HTTPProxy.Host == "" {
-		glog.Warning("EgressProxy set but no proxy host provided")
-	}
-
-	var httpProxyURL string
-	if proxies.HTTPProxy.Port == 0 {
-		httpProxyURL = "http://" + proxies.HTTPProxy.Host
-	} else {
-		httpProxyURL = "http://" + proxies.HTTPProxy.Host + ":" + strconv.Itoa(proxies.HTTPProxy.Port)
-	}
-
-	noProxy := proxies.ProxyExcludes
-
-	return []v1.EnvVar{
-		{Name: "http_proxy", Value: httpProxyURL},
-		{Name: "https_proxy", Value: httpProxyURL},
-		{Name: "NO_PROXY", Value: noProxy},
-		{Name: "no_proxy", Value: noProxy},
-	}
+	return list
 }
 
-// buildCertificateRequest retrieves the certificate from a keystore
-func buildCertificateRequest(c *fi.ModelBuilderContext, b *NodeupModelContext, name, path string) error {
-	cert, err := b.KeyStore.Cert(name)
-	if err != nil {
-		return err
-	}
-
-	serialized, err := cert.AsString()
-	if err != nil {
-		return err
-	}
-
-	location := filepath.Join(b.PathSrvKubernetes(), fmt.Sprintf("%s.pem", name))
-	if path != "" {
-		location = path
-	}
-
-	c.AddTask(&nodetasks.File{
-		Path:     location,
-		Contents: fi.NewStringResource(serialized),
-		Type:     nodetasks.FileType_File,
+// addHostPathMapping is shorthand for mapping a host path into a container
+func addHostPathMapping(pod *v1.Pod, container *v1.Container, name, path string) *v1.VolumeMount {
+	pod.Spec.Volumes = append(pod.Spec.Volumes, v1.Volume{
+		Name: name,
+		VolumeSource: v1.VolumeSource{
+			HostPath: &v1.HostPathVolumeSource{
+				Path: path,
+			},
+		},
 	})
 
-	return nil
+	container.VolumeMounts = append(container.VolumeMounts, v1.VolumeMount{
+		Name:      name,
+		MountPath: path,
+		ReadOnly:  true,
+	})
+
+	return &container.VolumeMounts[len(container.VolumeMounts)-1]
 }
 
-// buildPrivateKeyRequest retrieves a private key from the store
-func buildPrivateKeyRequest(c *fi.ModelBuilderContext, b *NodeupModelContext, name, path string) error {
-	k, err := b.KeyStore.PrivateKey(name)
-	if err != nil {
-		return err
+// addHostPathVolume is shorthand for mapping a host path into a container
+func addHostPathVolume(pod *v1.Pod, container *v1.Container, hostPath v1.HostPathVolumeSource, volumeMount v1.VolumeMount) {
+	vol := v1.Volume{
+		Name: volumeMount.Name,
+		VolumeSource: v1.VolumeSource{
+			HostPath: &hostPath,
+		},
 	}
 
-	serialized, err := k.AsString()
-	if err != nil {
-		return err
+	if volumeMount.MountPath == "" {
+		volumeMount.MountPath = hostPath.Path
 	}
 
-	location := filepath.Join(b.PathSrvKubernetes(), fmt.Sprintf("%s-key.pem", name))
-	if path != "" {
-		location = path
-	}
+	pod.Spec.Volumes = append(pod.Spec.Volumes, vol)
+	container.VolumeMounts = append(container.VolumeMounts, volumeMount)
+}
 
-	c.AddTask(&nodetasks.File{
-		Path:     location,
-		Contents: fi.NewStringResource(serialized),
-		Type:     nodetasks.FileType_File,
-	})
-
-	return nil
+// convEtcdSettingsToMs converts etcd settings to a string rep of int milliseconds
+func convEtcdSettingsToMs(dur *metav1.Duration) string {
+	return strconv.FormatInt(dur.Nanoseconds()/1000000, 10)
 }

@@ -18,11 +18,12 @@ package channels
 
 import (
 	"fmt"
-	"github.com/golang/glog"
+	"net/url"
+
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/klog"
 	"k8s.io/kops/channels/pkg/api"
-	"net/url"
 )
 
 // Addon is a wrapper around a single version of an addon
@@ -65,10 +66,12 @@ func (m *AddonMenu) MergeAddons(o *AddonMenu) {
 }
 
 func (a *Addon) ChannelVersion() *ChannelVersion {
+
 	return &ChannelVersion{
-		Channel: &a.ChannelName,
-		Version: a.Spec.Version,
-		Id:      a.Spec.Id,
+		Channel:      &a.ChannelName,
+		Version:      a.Spec.Version,
+		Id:           a.Spec.Id,
+		ManifestHash: a.Spec.ManifestHash,
 	}
 }
 
@@ -84,6 +87,7 @@ func (a *Addon) buildChannel() *Channel {
 	}
 	return channel
 }
+
 func (a *Addon) GetRequiredUpdates(k8sClient kubernetes.Interface) (*AddonUpdate, error) {
 	newVersion := a.ChannelVersion()
 
@@ -105,14 +109,7 @@ func (a *Addon) GetRequiredUpdates(k8sClient kubernetes.Interface) (*AddonUpdate
 	}, nil
 }
 
-func (a *Addon) EnsureUpdated(k8sClient kubernetes.Interface) (*AddonUpdate, error) {
-	required, err := a.GetRequiredUpdates(k8sClient)
-	if err != nil {
-		return nil, err
-	}
-	if required == nil {
-		return nil, nil
-	}
+func (a *Addon) GetManifestFullUrl() (*url.URL, error) {
 
 	if a.Spec.Manifest == nil || *a.Spec.Manifest == "" {
 		return nil, field.Required(field.NewPath("Spec", "Manifest"), "")
@@ -126,17 +123,32 @@ func (a *Addon) EnsureUpdated(k8sClient kubernetes.Interface) (*AddonUpdate, err
 	if !manifestURL.IsAbs() {
 		manifestURL = a.ChannelLocation.ResolveReference(manifestURL)
 	}
-	glog.Infof("Applying update from %q", manifestURL)
+	return manifestURL, nil
+}
+
+func (a *Addon) EnsureUpdated(k8sClient kubernetes.Interface) (*AddonUpdate, error) {
+	required, err := a.GetRequiredUpdates(k8sClient)
+	if err != nil {
+		return nil, err
+	}
+	if required == nil {
+		return nil, nil
+	}
+	manifestURL, err := a.GetManifestFullUrl()
+	if err != nil {
+		return nil, err
+	}
+	klog.Infof("Applying update from %q", manifestURL)
 
 	err = Apply(manifestURL.String())
 	if err != nil {
-		return nil, fmt.Errorf("error applying update from %q: %v", manifest, err)
+		return nil, fmt.Errorf("error applying update from %q: %v", manifestURL, err)
 	}
 
 	channel := a.buildChannel()
 	err = channel.SetInstalledVersion(k8sClient, a.ChannelVersion())
 	if err != nil {
-		return nil, fmt.Errorf("error applying annotation to to record addon installation: %v", err)
+		return nil, fmt.Errorf("error applying annotation to record addon installation: %v", err)
 	}
 
 	return required, nil

@@ -1,8 +1,8 @@
 # USING KOPS WITH COREOS - A MULTI-MASTER/MULTI-NODE PRACTICAL EXAMPLE
 
-## WHAT WE WANT TO ACOMPLISH HERE ?.
+## WHAT WE WANT TO ACCOMPLISH HERE?
 
-The exercise described on this document will focus on the following goals:
+The exercise described in this document will focus on the following goals:
 
 - Demonstrate how to use a production-setup with 3 masters and multiple working nodes (two).
 - Change our default base-distro (Debian 8) for CoreOS stable, available too as an AMI on AWS.
@@ -12,28 +12,12 @@ The exercise described on this document will focus on the following goals:
 
 ## PRE-FLIGHT CHECK:
 
-Before rushing in to replicate this exercise, please ensure your basic environment is correctly setup. See the [KOPS AWS tutorial for more information](https://github.com/kubernetes/kops/blob/master/docs/aws.md). 
-
-Ensure that the following points are covered and working in your environment:
-
-- AWS cli fully configured (aws account already with proper permissions/roles needed for kops). Depending on your distro, you can setup directly from packages, or if you want the most updated version, use "pip" and install awscli by issuing a "pip install awscli" command. Your choice !.
-- Local ssh key ready on ~/.ssh/id_rsa / id_rsa.pub. You can generate it using "ssh-keygen" command: `ssh-keygen -t rsa -f ~/.ssh/id_rsa -P ""`
-- Region set to us-east-1 (az's: us-east-1a, us-east-1b, us-east-1c, us-east-1d and us-east-1e). For this exercise we'll deploy our cluster on US-EAST-1. For real HA at kubernetes master level, you need 3 masters. If you want to ensure that each master is deployed on a different availability zone, then a region with "at least" 3 availabity zones is required here. You can still deploy a multi-master kubenetes setup on regions with just 2 az's, but this mean that two masters will be deployed on a single az, and of this az goes offline then you'll lose two master !. If possible, always pick a region with at least 3 different availability zones for real H.A. You always can check amazon regions and az's on the link: [AWS Global Infrastructure](https://aws.amazon.com/about-aws/global-infrastructure/)
-- kubectl and kops installed. For this last part, you can do this with using following commnads (do this as root please). Next commands asume you are running a amd64/x86_64 linux distro:
-
-```bash
-cd ~
-curl -LO https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl
-wget https://github.com/kubernetes/kops/releases/download/1.7.0/kops-linux-amd64
-chmod 755 kubectl kops-linux-amd64
-mv kops-linux-amd64 kops
-mv kubectl kops  /usr/local/bin
-```
+Please follow our [basic-requirements document](basic-requirements.md) that is common for all our exercises. Ensure the basic requirements are covered before continuing.
 
 
 ## AWS/KOPS ENVIRONMENT INFORMATION SETUP:
 
-First, using some scripting and asuming you already configured your "aws" environment on your linux system, use the following commands in order to export your AWS access/secret (this will work if you are using the default profile):
+First, using some scripting and assuming you already configured your "aws" environment on your linux system, use the following commands in order to export your AWS access/secret (this will work if you are using the default profile):
 
 ```bash
 export AWS_ACCESS_KEY_ID=`grep aws_access_key_id ~/.aws/credentials|awk '{print $3}'`
@@ -63,22 +47,22 @@ export KOPS_STATE_STORE=s3://my-kops-s3-bucket-for-cluster-state
 Some things to note from here:
 
 - "NAME" will be an environment variable that we'll use from now in order to refer to our cluster name. For this practical exercise, our cluster name is "coreosbasedkopscluster.k8s.local".
-- Because we'll use gossip DNS instead of a valid DNS domain on AWS ROUTE53 service, our cluster name need to include the string **".k8s.local"** at the end (this is covered on our AWS tutorials). You can see more about this on our [Getting Started Doc.](https://github.com/kubernetes/kops/blob/master/docs/aws.md)
+- Because we'll use gossip DNS instead of a valid DNS domain on AWS ROUTE53 service, our cluster name needs to include the string **".k8s.local"** at the end (this is covered on our AWS tutorials). You can see more about this on our [Getting Started Doc.](https://github.com/kubernetes/kops/blob/master/docs/aws.md)
 
 
 ## COREOS IMAGE INFORMATION:
 
-CoreOS webpage includes a "json" with the updated list of lattest images: [https://coreos.com/dist/aws/aws-stable.json](https://coreos.com/dist/aws/aws-stable.json)
+CoreOS webpage includes a "json" with the updated list of latest images: [https://coreos.com/dist/aws/aws-stable.json](https://coreos.com/dist/aws/aws-stable.json)
 
-If you install the "jq" utility (available on most distros) you can obtain the "ami" for a specific region (change the region "-" for "_" in the following command):
+By using "jq" you can obtain the "ami" for a specific region
 
 
 ```bash
-curl -s https://coreos.com/dist/aws/aws-stable.json|sed -r 's/-/_/g'|jq '.us_east_1.hvm'|sed -r 's/_/-/g'
+curl -s https://coreos.com/dist/aws/aws-stable.json | jq -r '.["us-east-1"].hvm'
 "ami-32705b49"
 ```
 
-The last command will check the all "hvm" CoreOS images on us-east-1 region (us_east_1 for our command). Please, always use "hvm" images.
+The last command will check the all "hvm" CoreOS images on us-east-1 region. Please, always use "hvm" images.
 
 At the moment we created this document, our ami was: "ami-32705b49". More info about the image can be obtained by using the following "aws-cli" command:
 
@@ -143,9 +127,9 @@ aws ec2 describe-images --region=us-east-1 --owner=595879546273 \
 +----+--------------------------------------------+
 ```
 
-Then, our image for CoreOS, in "AMI" format is "ami-32705b49", or in owner/name format "595879546273/CoreOS-stable-1409.8.0-hvm". Note that KOPS default image is a debian-jessie based one (more specifically: "kope.io/k8s-1.6-debian-jessie-amd64-hvm-ebs-2017-07-28" at the moment we are writing this document).
+Then, our image for CoreOS, in "AMI" format is "ami-32705b49", or in owner/name format "595879546273/CoreOS-stable-1409.8.0-hvm". Note that KOPS default image is a debian-jessie based one (more specifically: "kope.io/k8s-1.6-debian-jessie-amd64-hvm-ebs-2017-05-02" at the moment we are writing this document).
 
-**NOTE:** Always obtain the latest image before deploying KOPS. CoreOS updates it's AWS image very often. Don't rely on the versions included on this document. Always check first !
+**NOTE:** Always obtain the latest image before deploying KOPS. CoreOS updates it's AWS image very often. Don't rely on the versions included on this document. Always check first.
 
 
 ## KOPS CLUSTER CREATION AND MODIFICATION:
@@ -203,7 +187,7 @@ Your cluster coreosbasedkopscluster.k8s.local is ready
 
 ```
 
-Before continuing, let's note something interesting here: Can you see your masters ?. Two of them (master-us-east-1a and master-us-east-1c) are using "m3.medium" "aws instance type", but "master-us-east-1b" is using "c4.large". This happens because KOPS uses the AWS API in order to determine if the required instance type is available on the "az". At the moment we launched this cluster, "m3.medium" was unavailable on "us-east-1b". This forced KOPS to choose the nearest instance type candidate on the AZ.
+Before continuing, let's note something interesting here: Can you see your masters? Two of them (master-us-east-1a and master-us-east-1c) are using "m3.medium" "aws instance type", but "master-us-east-1b" is using "c4.large". This happens because KOPS uses the AWS API in order to determine if the required instance type is available on the "az". At the moment we launched this cluster, "m3.medium" was unavailable on "us-east-1b". This forced KOPS to choose the nearest instance type candidate on the AZ.
 
 If you don't want KOPS to auto-select the instance type, you can use the following arguments in order to enforce the instance types for both masters and nodes:
 

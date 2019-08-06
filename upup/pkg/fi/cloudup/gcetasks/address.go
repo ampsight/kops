@@ -18,8 +18,9 @@ package gcetasks
 
 import (
 	"fmt"
-	"github.com/golang/glog"
+
 	compute "google.golang.org/api/compute/v0.beta"
+	"k8s.io/klog"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/gce"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraform"
@@ -47,7 +48,7 @@ func findAddressByIP(cloud gce.GCECloud, ip string) (*Address, error) {
 	// Technically this is a regex, but it doesn't matter...
 	r, err := cloud.Compute().Addresses.List(cloud.Project(), cloud.Region()).Filter("address eq " + ip).Do()
 	if err != nil {
-		return nil, fmt.Errorf("error listing IPAddresss: %v", err)
+		return nil, fmt.Errorf("error listing IP Addresses: %v", err)
 	}
 
 	if len(r.Items) == 0 {
@@ -71,7 +72,7 @@ func (e *Address) find(cloud gce.GCECloud) (*Address, error) {
 			return nil, nil
 		}
 
-		return nil, fmt.Errorf("error listing IPAddresss: %v", err)
+		return nil, fmt.Errorf("error listing IP Addresses: %v", err)
 	}
 
 	actual := &Address{}
@@ -86,7 +87,7 @@ var _ fi.HasAddress = &Address{}
 func (e *Address) FindIPAddress(context *fi.Context) (*string, error) {
 	actual, err := e.find(context.Cloud.(gce.GCECloud))
 	if err != nil {
-		return nil, fmt.Errorf("error querying for IPAddress: %v", err)
+		return nil, fmt.Errorf("error querying for IP Address: %v", err)
 	}
 	if actual == nil {
 		return nil, nil
@@ -110,7 +111,7 @@ func (_ *Address) CheckChanges(a, e, changes *Address) error {
 	return nil
 }
 
-func (_ *Address) RenderGCE(t gce.GCEAPITarget, a, e, changes *Address) error {
+func (_ *Address) RenderGCE(t *gce.GCEAPITarget, a, e, changes *Address) error {
 	cloud := t.Cloud
 	addr := &compute.Address{
 		Name:    *e.Name,
@@ -119,18 +120,18 @@ func (_ *Address) RenderGCE(t gce.GCEAPITarget, a, e, changes *Address) error {
 	}
 
 	if a == nil {
-		glog.Infof("GCE creating address: %q", addr.Name)
+		klog.Infof("GCE creating address: %q", addr.Name)
 
 		op, err := cloud.Compute().Addresses.Insert(cloud.Project(), cloud.Region(), addr).Do()
 		if err != nil {
-			return fmt.Errorf("error creating IPAddress: %v", err)
+			return fmt.Errorf("error creating IP Address: %v", err)
 		}
 
 		if err := cloud.WaitForOp(op); err != nil {
-			return fmt.Errorf("error waiting for IPAddress: %v", err)
+			return fmt.Errorf("error waiting for IP Address: %v", err)
 		}
 	} else {
-		return fmt.Errorf("Cannot apply changes to IPAddress: %v", changes)
+		return fmt.Errorf("Cannot apply changes to IP Address: %v", changes)
 	}
 
 	return nil

@@ -18,24 +18,50 @@ package awsup
 
 import (
 	"fmt"
+	"os"
+	"sync"
+
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
+	"github.com/aws/aws-sdk-go/aws/endpoints"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/autoscaling"
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/aws/aws-sdk-go/service/elb"
-	"github.com/golang/glog"
+	elbv2 "github.com/aws/aws-sdk-go/service/elbv2"
+	"k8s.io/klog"
 	"k8s.io/kops/pkg/apis/kops"
-	"os"
 )
 
 // allRegions is the list of all regions; tests will set the values
 var allRegions []*ec2.Region
+var allRegionsMutex sync.Mutex
+
+// isRegionCompiledInToAWSSDK checks if the specified region is in the AWS SDK
+func isRegionCompiledInToAWSSDK(region string) bool {
+	resolver := endpoints.DefaultResolver()
+	partitions := resolver.(endpoints.EnumPartitions).Partitions()
+	for _, p := range partitions {
+		for _, r := range p.Regions() {
+			if r.ID() == region {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // ValidateRegion checks that an AWS region name is valid
 func ValidateRegion(region string) error {
+	if isRegionCompiledInToAWSSDK(region) {
+		return nil
+	}
+
+	allRegionsMutex.Lock()
+	defer allRegionsMutex.Unlock()
+
 	if allRegions == nil {
-		glog.V(2).Infof("Querying EC2 for all valid regions")
+		klog.V(2).Infof("Querying EC2 for all valid regions")
 
 		request := &ec2.DescribeRegionsInput{}
 		awsRegion := os.Getenv("AWS_REGION")
@@ -67,7 +93,7 @@ func ValidateRegion(region string) error {
 	}
 
 	if os.Getenv("SKIP_REGION_CHECK") != "" {
-		glog.Infof("AWS region does not appear to be valid, but skipping because SKIP_REGION_CHECK is set")
+		klog.Infof("AWS region does not appear to be valid, but skipping because SKIP_REGION_CHECK is set")
 		return nil
 	}
 
@@ -119,6 +145,16 @@ func FindASGTag(tags []*autoscaling.TagDescription, key string) (string, bool) {
 
 // FindELBTag find the value of the tag with the specified key
 func FindELBTag(tags []*elb.Tag, key string) (string, bool) {
+	for _, tag := range tags {
+		if key == aws.StringValue(tag.Key) {
+			return aws.StringValue(tag.Value), true
+		}
+	}
+	return "", false
+}
+
+// FindELBV2Tag find the value of the tag with the specified key
+func FindELBV2Tag(tags []*elbv2.Tag, key string) (string, bool) {
 	for _, tag := range tags {
 		if key == aws.StringValue(tag.Key) {
 			return aws.StringValue(tag.Value), true

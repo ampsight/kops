@@ -17,11 +17,12 @@ limitations under the License.
 package components
 
 import (
-	"github.com/golang/glog"
+	"strings"
+
+	"k8s.io/klog"
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/loader"
-	"strings"
 )
 
 // KubeletOptionsBuilder adds options for kubelets
@@ -31,6 +32,7 @@ type KubeletOptionsBuilder struct {
 
 var _ loader.OptionsBuilder = &KubeletOptionsBuilder{}
 
+// BuildOptions is responsible for filling the defaults for the kubelet
 func (b *KubeletOptionsBuilder) BuildOptions(o interface{}) error {
 	clusterSpec := o.(*kops.ClusterSpec)
 
@@ -46,19 +48,44 @@ func (b *KubeletOptionsBuilder) BuildOptions(o interface{}) error {
 		clusterSpec.MasterKubelet = &kops.KubeletConfigSpec{}
 	}
 
-	ip, err := WellKnownServiceIP(clusterSpec, 10)
-	if err != nil {
-		return err
+	if clusterSpec.KubeAPIServer != nil && clusterSpec.KubeAPIServer.EnableBootstrapAuthToken != nil {
+		if *clusterSpec.KubeAPIServer.EnableBootstrapAuthToken {
+			if clusterSpec.Kubelet.BootstrapKubeconfig == "" {
+				clusterSpec.Kubelet.BootstrapKubeconfig = "/var/lib/kubelet/bootstrap-kubeconfig"
+			}
+		}
 	}
 
 	// Standard options
 	clusterSpec.Kubelet.EnableDebuggingHandlers = fi.Bool(true)
 	clusterSpec.Kubelet.PodManifestPath = "/etc/kubernetes/manifests"
-	clusterSpec.Kubelet.AllowPrivileged = fi.Bool(true)
 	clusterSpec.Kubelet.LogLevel = fi.Int32(2)
-	clusterSpec.Kubelet.ClusterDNS = ip.String()
 	clusterSpec.Kubelet.ClusterDomain = clusterSpec.ClusterDNSDomain
 	clusterSpec.Kubelet.NonMasqueradeCIDR = clusterSpec.NonMasqueradeCIDR
+
+	// AllowPrivileged is deprecated and removed in v1.14.
+	// See https://github.com/kubernetes/kubernetes/pull/71835
+	if kubernetesVersion.Major == 1 && kubernetesVersion.Minor >= 14 {
+		if clusterSpec.Kubelet.AllowPrivileged != nil {
+			// If it is explicitly set to false, return an error, because this
+			// behavior is no longer supported in v1.14 (the default was true, prior).
+			if *clusterSpec.Kubelet.AllowPrivileged == false {
+				klog.Warningf("Kubelet's --allow-privileged flag is no longer supported in v1.14.")
+			}
+			// Explicitly set it to nil, so it won't be passed on the command line.
+			clusterSpec.Kubelet.AllowPrivileged = nil
+		}
+	} else {
+		clusterSpec.Kubelet.AllowPrivileged = fi.Bool(true)
+	}
+
+	if clusterSpec.Kubelet.ClusterDNS == "" {
+		ip, err := WellKnownServiceIP(clusterSpec, 10)
+		if err != nil {
+			return err
+		}
+		clusterSpec.Kubelet.ClusterDNS = ip.String()
+	}
 
 	if b.Context.IsKubernetesLT("1.7") {
 		// babysit-daemons removed in 1.7
@@ -113,16 +140,21 @@ func (b *KubeletOptionsBuilder) BuildOptions(o interface{}) error {
 		}
 	}
 
-	if kubernetesVersion.Major == 1 && kubernetesVersion.Minor <= 5 {
-		clusterSpec.Kubelet.APIServers = "https://" + clusterSpec.MasterInternalName
-		clusterSpec.MasterKubelet.APIServers = "http://127.0.0.1:8080"
-	} else if kubernetesVersion.Major == 1 { // for 1.6+ use kubeconfig instead of api-servers
+	if b.Context.IsKubernetesGTE("1.6") {
+		// for 1.6+ use kubeconfig instead of api-servers
 		const kubeconfigPath = "/var/lib/kubelet/kubeconfig"
 		clusterSpec.Kubelet.KubeconfigPath = kubeconfigPath
-		clusterSpec.Kubelet.RequireKubeconfig = fi.Bool(true)
-
 		clusterSpec.MasterKubelet.KubeconfigPath = kubeconfigPath
-		clusterSpec.MasterKubelet.RequireKubeconfig = fi.Bool(true)
+
+		// Only pass require-kubeconfig to versions prior to 1.9; deprecated & being removed
+		if b.Context.IsKubernetesLT("1.9") {
+			clusterSpec.Kubelet.RequireKubeconfig = fi.Bool(true)
+			clusterSpec.MasterKubelet.RequireKubeconfig = fi.Bool(true)
+		}
+	} else {
+		// Legacy behaviour for <= 1.5
+		clusterSpec.Kubelet.APIServers = "https://" + clusterSpec.MasterInternalName
+		clusterSpec.MasterKubelet.APIServers = "http://127.0.0.1:8080"
 	}
 
 	// IsolateMasters enables the legacy behaviour, where master pods on a separate network
@@ -136,7 +168,7 @@ func (b *KubeletOptionsBuilder) BuildOptions(o interface{}) error {
 
 	clusterSpec.Kubelet.CgroupRoot = "/"
 
-	glog.V(1).Infof("Cloud Provider: %s", cloudProvider)
+	klog.V(1).Infof("Cloud Provider: %s", cloudProvider)
 	if cloudProvider == kops.CloudProviderAWS {
 		clusterSpec.Kubelet.CloudProvider = "aws"
 
@@ -148,11 +180,15 @@ func (b *KubeletOptionsBuilder) BuildOptions(o interface{}) error {
 		}
 
 		// Use the hostname from the AWS metadata service
-		clusterSpec.Kubelet.HostnameOverride = "@aws"
+		// if hostnameOverride is not set.
+		if clusterSpec.Kubelet.HostnameOverride == "" {
+			clusterSpec.Kubelet.HostnameOverride = "@aws"
+		}
 	}
 
 	if cloudProvider == kops.CloudProviderDO {
 		clusterSpec.Kubelet.CloudProvider = "external"
+		clusterSpec.Kubelet.HostnameOverride = "@digitalocean"
 	}
 
 	if cloudProvider == kops.CloudProviderGCE {
@@ -171,6 +207,18 @@ func (b *KubeletOptionsBuilder) BuildOptions(o interface{}) error {
 		clusterSpec.Kubelet.HairpinMode = "promiscuous-bridge"
 	}
 
+	if cloudProvider == kops.CloudProviderOpenstack {
+		clusterSpec.Kubelet.CloudProvider = "openstack"
+	}
+
+	if cloudProvider == kops.CloudProviderALI {
+		clusterSpec.Kubelet.CloudProvider = "alicloud"
+	}
+
+	if clusterSpec.ExternalCloudControllerManager != nil {
+		clusterSpec.Kubelet.CloudProvider = "external"
+	}
+
 	usesKubenet, err := UsesKubenet(clusterSpec)
 	if err != nil {
 		return err
@@ -185,11 +233,20 @@ func (b *KubeletOptionsBuilder) BuildOptions(o interface{}) error {
 	}
 
 	// Specify our pause image
-	image := "gcr.io/google_containers/pause-amd64:3.0"
+	image := "k8s.gcr.io/pause-amd64:3.0"
 	if image, err = b.Context.AssetBuilder.RemapImage(image); err != nil {
 		return err
 	}
 	clusterSpec.Kubelet.PodInfraContainerImage = image
+
+	if clusterSpec.Kubelet.FeatureGates == nil {
+		clusterSpec.Kubelet.FeatureGates = make(map[string]string)
+	}
+	if _, found := clusterSpec.Kubelet.FeatureGates["ExperimentalCriticalPodAnnotation"]; !found {
+		if b.Context.IsKubernetesGTE("1.5.2") {
+			clusterSpec.Kubelet.FeatureGates["ExperimentalCriticalPodAnnotation"] = "true"
+		}
+	}
 
 	return nil
 }

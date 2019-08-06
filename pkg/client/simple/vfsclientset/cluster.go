@@ -18,19 +18,23 @@ package vfsclientset
 
 import (
 	"fmt"
-	"github.com/golang/glog"
+	"os"
+	"strings"
+	"time"
+
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/klog"
 	api "k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/apis/kops/registry"
 	"k8s.io/kops/pkg/apis/kops/v1alpha1"
 	"k8s.io/kops/pkg/apis/kops/validation"
 	"k8s.io/kops/util/pkg/vfs"
-	"os"
-	"strings"
-	"time"
 )
 
 type ClusterVFS struct {
@@ -49,7 +53,14 @@ func (c *ClusterVFS) Get(name string, options metav1.GetOptions) (*api.Cluster, 
 	if options.ResourceVersion != "" {
 		return nil, fmt.Errorf("ResourceVersion not supported in ClusterVFS::Get")
 	}
-	return c.find(name)
+	o, err := c.find(name)
+	if err != nil {
+		return nil, err
+	}
+	if o == nil {
+		return nil, errors.NewNotFound(schema.GroupResource{Group: api.GroupName, Resource: "Cluster"}, name)
+	}
+	return o, nil
 }
 
 // Deprecated, but we need this for now..
@@ -72,12 +83,12 @@ func (c *ClusterVFS) List(options metav1.ListOptions) (*api.ClusterList, error) 
 	for _, clusterName := range names {
 		cluster, err := c.find(clusterName)
 		if err != nil {
-			glog.Warningf("cluster %q found in state store listing, but cannot be loaded: %v", clusterName, err)
+			klog.Warningf("cluster %q found in state store listing, but cannot be loaded: %v", clusterName, err)
 			continue
 		}
 
 		if cluster == nil {
-			glog.Warningf("cluster %q found in state store listing, but doesn't exist now", clusterName)
+			klog.Warningf("cluster %q found in state store listing, but doesn't exist now", clusterName)
 			continue
 		}
 
@@ -101,7 +112,7 @@ func (r *ClusterVFS) Create(c *api.Cluster) (*api.Cluster, error) {
 		return nil, fmt.Errorf("clusterName is required")
 	}
 
-	if err := r.writeConfig(r.basePath.Join(clusterName, registry.PathCluster), c, vfs.WriteOptionCreate); err != nil {
+	if err := r.writeConfig(c, r.basePath.Join(clusterName, registry.PathCluster), c, vfs.WriteOptionCreate); err != nil {
 		if os.IsExist(err) {
 			return nil, err
 		}
@@ -111,18 +122,30 @@ func (r *ClusterVFS) Create(c *api.Cluster) (*api.Cluster, error) {
 	return c, nil
 }
 
-func (r *ClusterVFS) Update(c *api.Cluster) (*api.Cluster, error) {
-	err := validation.ValidateCluster(c, false)
-	if err != nil {
-		return nil, err
-	}
-
+func (r *ClusterVFS) Update(c *api.Cluster, status *api.ClusterStatus) (*api.Cluster, error) {
 	clusterName := c.ObjectMeta.Name
 	if clusterName == "" {
 		return nil, field.Required(field.NewPath("Name"), "clusterName is required")
 	}
 
-	if err := r.writeConfig(r.basePath.Join(clusterName, registry.PathCluster), c, vfs.WriteOptionOnlyIfExists); err != nil {
+	old, err := r.Get(clusterName, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	if old == nil {
+		return nil, errors.NewNotFound(schema.GroupResource{Group: api.GroupName, Resource: "Cluster"}, clusterName)
+	}
+
+	if err := validation.ValidateClusterUpdate(c, status, old).ToAggregate(); err != nil {
+		return nil, err
+	}
+
+	if !apiequality.Semantic.DeepEqual(old.Spec, c.Spec) {
+		c.SetGeneration(old.GetGeneration() + 1)
+	}
+
+	if err := r.writeConfig(c, r.basePath.Join(clusterName, registry.PathCluster), c, vfs.WriteOptionOnlyIfExists); err != nil {
 		if os.IsNotExist(err) {
 			return nil, err
 		}
@@ -175,7 +198,7 @@ func (r *ClusterVFS) find(clusterName string) (*api.Cluster, error) {
 		c.ObjectMeta.Name = clusterName
 	}
 	if c.ObjectMeta.Name != clusterName {
-		glog.Warningf("Name of cluster does not match: %q vs %q", c.ObjectMeta.Name, clusterName)
+		klog.Warningf("Name of cluster does not match: actual name was %q, but cluster name was %q (using registry path %v).", c.ObjectMeta.Name, clusterName, registry.PathCluster)
 	}
 
 	// TODO: Split this out into real version updates / schema changes

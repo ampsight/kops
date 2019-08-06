@@ -20,19 +20,23 @@ import (
 	"fmt"
 
 	"encoding/base64"
+	"strings"
+
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ec2"
-	"github.com/golang/glog"
+	"k8s.io/klog"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraform"
-	"strings"
 )
 
+// MaxUserDataSize is the max size of the userdata
 const MaxUserDataSize = 16384
 
+// Instance defines the instance specification
 type Instance struct {
-	ID *string
+	ID        *string
+	Lifecycle *fi.Lifecycle
 
 	UserData fi.Resource
 
@@ -41,6 +45,8 @@ type Instance struct {
 
 	Name *string
 	Tags map[string]string
+
+	Shared *bool
 
 	ImageID            *string
 	InstanceType       *string
@@ -58,11 +64,20 @@ func (s *Instance) CompareWithID() *string {
 
 func (e *Instance) Find(c *fi.Context) (*Instance, error) {
 	cloud := c.Cloud.(awsup.AWSCloud)
+	var request *ec2.DescribeInstancesInput
 
-	filters := cloud.BuildFilters(e.Name)
-	filters = append(filters, awsup.NewEC2Filter("instance-state-name", "pending", "running", "stopping", "stopped"))
-	request := &ec2.DescribeInstancesInput{
-		Filters: filters,
+	if fi.BoolValue(e.Shared) {
+		var instanceIds []*string
+		instanceIds = append(instanceIds, e.ID)
+		request = &ec2.DescribeInstancesInput{
+			InstanceIds: instanceIds,
+		}
+	} else {
+		filters := cloud.BuildFilters(e.Name)
+		filters = append(filters, awsup.NewEC2Filter("instance-state-name", "pending", "running", "stopping", "stopped"))
+		request = &ec2.DescribeInstancesInput{
+			Filters: filters,
+		}
 	}
 
 	response, err := cloud.EC2().DescribeInstances(request)
@@ -87,7 +102,7 @@ func (e *Instance) Find(c *fi.Context) (*Instance, error) {
 		return nil, fmt.Errorf("found multiple Instances with name: %s", *e.Name)
 	}
 
-	glog.V(2).Info("found existing instance")
+	klog.V(2).Info("found existing instance")
 	i := instances[0]
 
 	if i.InstanceId == nil {
@@ -143,7 +158,10 @@ func (e *Instance) Find(c *fi.Context) (*Instance, error) {
 		actual.IAMInstanceProfile = &IAMInstanceProfile{Name: nameFromIAMARN(i.IamInstanceProfile.Arn)}
 	}
 
-	actual.Tags = mapEC2TagsToMap(i.Tags)
+	actual.Tags = intersectTags(i.Tags, e.Tags)
+
+	actual.Lifecycle = e.Lifecycle
+	actual.Shared = e.Shared
 
 	e.ID = actual.ID
 
@@ -151,11 +169,11 @@ func (e *Instance) Find(c *fi.Context) (*Instance, error) {
 	if e.ImageID != nil && actual.ImageID != nil && *actual.ImageID != *e.ImageID {
 		image, err := cloud.ResolveImage(*e.ImageID)
 		if err != nil {
-			glog.Warningf("unable to resolve image: %q: %v", *e.ImageID, err)
+			klog.Warningf("unable to resolve image: %q: %v", *e.ImageID, err)
 		} else if image == nil {
-			glog.Warningf("unable to resolve image: %q: not found", *e.ImageID)
+			klog.Warningf("unable to resolve image: %q: not found", *e.ImageID)
 		} else if aws.StringValue(image.ImageId) == *actual.ImageID {
-			glog.V(4).Infof("Returning matching ImageId as expected name: %q -> %q", *actual.ImageID, *e.ImageID)
+			klog.V(4).Infof("Returning matching ImageId as expected name: %q -> %q", *actual.ImageID, *e.ImageID)
 			actual.ImageID = e.ImageID
 		}
 	}
@@ -171,7 +189,7 @@ func nameFromIAMARN(arn *string) *string {
 	last := tokens[len(tokens)-1]
 
 	if !strings.HasPrefix(last, "instance-profile/") {
-		glog.Warningf("Unexpected ARN for instance profile: %q", *arn)
+		klog.Warningf("Unexpected ARN for instance profile: %q", *arn)
 	}
 
 	name := strings.TrimPrefix(last, "instance-profile/")
@@ -179,16 +197,12 @@ func nameFromIAMARN(arn *string) *string {
 }
 
 func (e *Instance) Run(c *fi.Context) error {
-	cloud := c.Cloud.(awsup.AWSCloud)
-
-	cloud.AddTags(e.Name, e.Tags)
-
 	return fi.DefaultDeltaRunMethod(e, c)
 }
 
 func (_ *Instance) CheckChanges(a, e, changes *Instance) error {
 	if a != nil {
-		if e.Name == nil {
+		if !fi.BoolValue(e.Shared) && e.Name == nil {
 			return fi.RequiredField("Name")
 		}
 	}
@@ -197,15 +211,20 @@ func (_ *Instance) CheckChanges(a, e, changes *Instance) error {
 
 func (_ *Instance) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *Instance) error {
 	if a == nil {
+
+		if fi.BoolValue(e.Shared) {
+			return fmt.Errorf("NAT EC2 Instance %q not found", fi.StringValue(e.ID))
+		}
+
 		if e.ImageID == nil {
 			return fi.RequiredField("ImageID")
 		}
-		image, err := t.Cloud.ResolveImage(*e.ImageID)
+		image, err := t.Cloud.ResolveImage(fi.StringValue(e.ImageID))
 		if err != nil {
 			return err
 		}
 
-		glog.V(2).Infof("Creating Instance with Name:%q", *e.Name)
+		klog.V(2).Infof("Creating Instance with Name:%q", fi.StringValue(e.Name))
 		request := &ec2.RunInstancesInput{
 			ImageId:      image.ImageId,
 			InstanceType: e.InstanceType,
@@ -233,7 +252,7 @@ func (_ *Instance) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *Instance) err
 
 		// Build up the actual block device mappings
 		// TODO: Support RootVolumeType & RootVolumeSize (see launchconfiguration)
-		blockDeviceMappings, err := buildEphemeralDevices(e.InstanceType)
+		blockDeviceMappings, err := buildEphemeralDevices(t.Cloud, fi.StringValue(e.InstanceType))
 		if err != nil {
 			return err
 		}
@@ -280,5 +299,13 @@ func (_ *Instance) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *Instance) err
 }
 
 func (e *Instance) TerraformLink() *terraform.Literal {
+	if fi.BoolValue(e.Shared) {
+		if e.ID == nil {
+			klog.Fatalf("ID must be set, if NAT Instance is shared: %s", e)
+		}
+
+		return terraform.LiteralFromStringValue(*e.ID)
+	}
+
 	return terraform.LiteralSelfLink("aws_instance", *e.Name)
 }

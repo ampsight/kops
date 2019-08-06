@@ -19,13 +19,15 @@ package protokube
 import (
 	"fmt"
 	"net"
+	"os"
 	"strings"
 
 	"cloud.google.com/go/compute/metadata"
-	"github.com/golang/glog"
 	"golang.org/x/net/context"
 	"golang.org/x/oauth2/google"
 	compute "google.golang.org/api/compute/v0.beta"
+	"k8s.io/klog"
+	"k8s.io/kops/protokube/pkg/etcd"
 	"k8s.io/kops/protokube/pkg/gossip"
 	gossipgce "k8s.io/kops/protokube/pkg/gossip/gce"
 	"k8s.io/kops/upup/pkg/fi/cloudup/gce"
@@ -75,7 +77,7 @@ func (a *GCEVolumes) ClusterID() string {
 	return a.clusterName
 }
 
-// ClusterID returns the current GCE project
+// Project returns the current GCE project
 func (a *GCEVolumes) Project() string {
 	return a.project
 }
@@ -97,7 +99,7 @@ func (a *GCEVolumes) discoverTags() error {
 		if a.clusterName == "" {
 			return fmt.Errorf("cluster-name metadata was empty")
 		}
-		glog.Infof("Found cluster-name=%q", a.clusterName)
+		klog.Infof("Found cluster-name=%q", a.clusterName)
 	}
 
 	// Project ID
@@ -110,7 +112,7 @@ func (a *GCEVolumes) discoverTags() error {
 		if a.project == "" {
 			return fmt.Errorf("project metadata was empty")
 		}
-		glog.Infof("Found project=%q", a.project)
+		klog.Infof("Found project=%q", a.project)
 	}
 
 	// Zone
@@ -123,14 +125,14 @@ func (a *GCEVolumes) discoverTags() error {
 		if a.zone == "" {
 			return fmt.Errorf("zone metadata was empty")
 		}
-		glog.Infof("Found zone=%q", a.zone)
+		klog.Infof("Found zone=%q", a.zone)
 
 		region, err := regionFromZone(zone)
 		if err != nil {
 			return fmt.Errorf("error determining region from zone %q: %v", zone, err)
 		}
 		a.region = region
-		glog.Infof("Found region=%q", a.region)
+		klog.Infof("Found region=%q", a.region)
 	}
 
 	// Instance Name
@@ -143,7 +145,7 @@ func (a *GCEVolumes) discoverTags() error {
 		if a.instanceName == "" {
 			return fmt.Errorf("instance name metadata was empty")
 		}
-		glog.Infof("Found instanceName=%q", a.instanceName)
+		klog.Infof("Found instanceName=%q", a.instanceName)
 	}
 
 	// Internal IP
@@ -159,7 +161,7 @@ func (a *GCEVolumes) discoverTags() error {
 		if a.internalIP == nil {
 			return fmt.Errorf("InternalIP from metadata was not parseable(%q)", internalIP)
 		}
-		glog.Infof("Found internalIP=%q", a.internalIP)
+		klog.Infof("Found internalIP=%q", a.internalIP)
 	}
 
 	return nil
@@ -187,9 +189,9 @@ func (v *GCEVolumes) buildGCEVolume(d *compute.Disk) (*Volume, error) {
 		if u.Project == v.project && u.Zone == v.zone && u.Name == v.instanceName {
 			devicePath := "/dev/disk/by-id/google-" + volumeName
 			vol.LocalDevice = devicePath
-			glog.V(2).Infof("volume %q is attached to this instance at %s", d.Name, devicePath)
+			klog.V(2).Infof("volume %q is attached to this instance at %s", d.Name, devicePath)
 		} else {
-			glog.V(2).Infof("volume %q is attached to another instance %q", d.Name, attachedTo)
+			klog.V(2).Infof("volume %q is attached to another instance %q", d.Name, attachedTo)
 		}
 	}
 
@@ -208,7 +210,7 @@ func (v *GCEVolumes) buildGCEVolume(d *compute.Disk) (*Volume, error) {
 				if err != nil {
 					return nil, fmt.Errorf("Error decoding GCE label: %s=%q", k, v)
 				}
-				spec, err := ParseEtcdClusterSpec(etcdClusterName, value)
+				spec, err := etcd.ParseEtcdClusterSpec(etcdClusterName, value)
 				if err != nil {
 					return nil, fmt.Errorf("error parsing etcd cluster label %q on volume %q: %v", value, volumeName, err)
 				}
@@ -216,7 +218,7 @@ func (v *GCEVolumes) buildGCEVolume(d *compute.Disk) (*Volume, error) {
 			} else if strings.HasPrefix(k, gce.GceLabelNameRolePrefix) {
 				// Ignore
 			} else {
-				glog.Warningf("unknown label on volume %q: %s=%s", volumeName, k, v)
+				klog.Warningf("unknown label on volume %q: %s=%s", volumeName, k, v)
 			}
 		}
 	}
@@ -227,17 +229,17 @@ func (v *GCEVolumes) buildGCEVolume(d *compute.Disk) (*Volume, error) {
 func (v *GCEVolumes) FindVolumes() ([]*Volume, error) {
 	var volumes []*Volume
 
-	glog.V(2).Infof("Listing GCE disks in %s/%s", v.project, v.zone)
+	klog.V(2).Infof("Listing GCE disks in %s/%s", v.project, v.zone)
 
 	// TODO: Apply filters
 	ctx := context.Background()
 	err := v.compute.Disks.List(v.project, v.zone).Pages(ctx, func(page *compute.DiskList) error {
 		for _, d := range page.Items {
-			glog.V(4).Infof("Found disk %q with labels %v", d.Name, d.Labels)
+			klog.V(4).Infof("Found disk %q with labels %v", d.Name, d.Labels)
 
 			diskClusterName := d.Labels[gce.GceLabelNameKubernetesCluster]
 			if diskClusterName == "" {
-				glog.V(2).Infof("Skipping disk %q with no cluster name", d.Name)
+				klog.V(4).Infof("Skipping disk %q with no cluster name", d.Name)
 				continue
 			}
 			// Note that the cluster name is _not_ encoded with EncodeGCELabel
@@ -246,7 +248,7 @@ func (v *GCEVolumes) FindVolumes() ([]*Volume, error) {
 			// Instead we use the much simpler SafeClusterName sanitizer
 			findClusterName := gce.SafeClusterName(v.clusterName)
 			if diskClusterName != findClusterName {
-				glog.V(2).Infof("Skipping disk %q with cluster name that does not match: %s=%s (looking for %s)", d.Name, gce.GceLabelNameKubernetesCluster, diskClusterName, findClusterName)
+				klog.V(2).Infof("Skipping disk %q with cluster name that does not match: %s=%s (looking for %s)", d.Name, gce.GceLabelNameKubernetesCluster, diskClusterName, findClusterName)
 				continue
 			}
 
@@ -257,7 +259,7 @@ func (v *GCEVolumes) FindVolumes() ([]*Volume, error) {
 
 					value, err := gce.DecodeGCELabel(v)
 					if err != nil {
-						glog.Warningf("error decoding GCE role label: %s=%s", k, v)
+						klog.Warningf("error decoding GCE role label: %s=%s", k, v)
 						continue
 					}
 					roles[roleName] = value
@@ -266,14 +268,14 @@ func (v *GCEVolumes) FindVolumes() ([]*Volume, error) {
 
 			_, isMaster := roles["master"]
 			if !isMaster {
-				glog.V(2).Infof("Skipping disk %q - no master role", d.Name)
+				klog.V(2).Infof("Skipping disk %q - no master role", d.Name)
 				continue
 			}
 
 			vol, err := v.buildGCEVolume(d)
 			if err != nil {
 				// Fail safe
-				glog.Warningf("skipping malformed volume %q: %v", d.Name, err)
+				klog.Warningf("skipping malformed volume %q: %v", d.Name, err)
 				continue
 			}
 			volumes = append(volumes, vol)
@@ -307,6 +309,20 @@ func (v *GCEVolumes) FindVolumes() ([]*Volume, error) {
 	//}
 
 	return volumes, nil
+}
+
+// FindMountedVolume implements Volumes::FindMountedVolume
+func (v *GCEVolumes) FindMountedVolume(volume *Volume) (string, error) {
+	device := volume.LocalDevice
+
+	_, err := os.Stat(pathFor(device))
+	if err == nil {
+		return device, nil
+	}
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	return "", fmt.Errorf("error checking for device %q: %v", device, err)
 }
 
 // AttachVolume attaches the specified volume to this instance, returning the mountpoint & nil if successful

@@ -19,19 +19,25 @@ package mockec2
 import (
 	"encoding/binary"
 	"fmt"
+	"net"
+
+	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/request"
 	"github.com/aws/aws-sdk-go/service/ec2"
-	"github.com/golang/glog"
-	"net"
+	"k8s.io/klog"
 )
 
 func (m *MockEC2) AllocateAddressRequest(*ec2.AllocateAddressInput) (*request.Request, *ec2.AllocateAddressOutput) {
 	panic("Not implemented")
-	return nil, nil
 }
 
-func (m *MockEC2) AllocateAddress(request *ec2.AllocateAddressInput) (*ec2.AllocateAddressOutput, error) {
-	glog.Infof("AllocateAddress: %v", request)
+func (m *MockEC2) AllocateAddressWithContext(aws.Context, *ec2.AllocateAddressInput, ...request.Option) (*ec2.AllocateAddressOutput, error) {
+	panic("Not implemented")
+}
+
+func (m *MockEC2) AllocateAddressWithId(request *ec2.AllocateAddressInput, id string) (*ec2.AllocateAddressOutput, error) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
 
 	m.addressNumber++
 	n := m.addressNumber
@@ -45,11 +51,14 @@ func (m *MockEC2) AllocateAddress(request *ec2.AllocateAddressInput) (*ec2.Alloc
 	}
 
 	address := &ec2.Address{
-		AllocationId: s(fmt.Sprintf("eip-%d", n)),
+		AllocationId: s(id),
 		Domain:       s("vpc"),
 		PublicIp:     s(publicIP.String()),
 	}
-	m.Addresses = append(m.Addresses, address)
+	if m.Addresses == nil {
+		m.Addresses = make(map[string]*ec2.Address)
+	}
+	m.Addresses[id] = address
 	response := &ec2.AllocateAddressOutput{
 		AllocationId: address.AllocationId,
 		Domain:       address.Domain,
@@ -58,32 +67,49 @@ func (m *MockEC2) AllocateAddress(request *ec2.AllocateAddressInput) (*ec2.Alloc
 	return response, nil
 }
 
+func (m *MockEC2) AllocateAddress(request *ec2.AllocateAddressInput) (*ec2.AllocateAddressOutput, error) {
+	klog.Infof("AllocateAddress: %v", request)
+	id := m.allocateId("eipalloc")
+	return m.AllocateAddressWithId(request, id)
+}
+
 func (m *MockEC2) AssignPrivateIpAddressesRequest(*ec2.AssignPrivateIpAddressesInput) (*request.Request, *ec2.AssignPrivateIpAddressesOutput) {
 	panic("Not implemented")
-	return nil, nil
+}
+
+func (m *MockEC2) AssignPrivateIpAddressesWithContext(aws.Context, *ec2.AssignPrivateIpAddressesInput, ...request.Option) (*ec2.AssignPrivateIpAddressesOutput, error) {
+	panic("Not implemented")
 }
 
 func (m *MockEC2) AssignPrivateIpAddresses(*ec2.AssignPrivateIpAddressesInput) (*ec2.AssignPrivateIpAddressesOutput, error) {
 	panic("Not implemented")
-	return nil, nil
 }
 
 func (m *MockEC2) AssociateAddressRequest(*ec2.AssociateAddressInput) (*request.Request, *ec2.AssociateAddressOutput) {
 	panic("Not implemented")
-	return nil, nil
+}
+
+func (m *MockEC2) AssociateAddressWithContext(aws.Context, *ec2.AssociateAddressInput, ...request.Option) (*ec2.AssociateAddressOutput, error) {
+	panic("Not implemented")
 }
 
 func (m *MockEC2) AssociateAddress(*ec2.AssociateAddressInput) (*ec2.AssociateAddressOutput, error) {
 	panic("Not implemented")
-	return nil, nil
 }
 
 func (m *MockEC2) DescribeAddressesRequest(*ec2.DescribeAddressesInput) (*request.Request, *ec2.DescribeAddressesOutput) {
 	panic("Not implemented")
-	return nil, nil
 }
+
+func (m *MockEC2) DescribeAddressesWithContext(aws.Context, *ec2.DescribeAddressesInput, ...request.Option) (*ec2.DescribeAddressesOutput, error) {
+	panic("Not implemented")
+}
+
 func (m *MockEC2) DescribeAddresses(request *ec2.DescribeAddressesInput) (*ec2.DescribeAddressesOutput, error) {
-	glog.Infof("DescribeAddresses: %v", request)
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	klog.Infof("DescribeAddresses: %v", request)
 
 	var addresses []*ec2.Address
 
@@ -134,11 +160,25 @@ func (m *MockEC2) DescribeAddresses(request *ec2.DescribeAddressesInput) (*ec2.D
 
 	return response, nil
 }
+
 func (m *MockEC2) ReleaseAddressRequest(*ec2.ReleaseAddressInput) (*request.Request, *ec2.ReleaseAddressOutput) {
 	panic("Not implemented")
-	return nil, nil
 }
-func (m *MockEC2) ReleaseAddress(*ec2.ReleaseAddressInput) (*ec2.ReleaseAddressOutput, error) {
+func (m *MockEC2) ReleaseAddressWithContext(aws.Context, *ec2.ReleaseAddressInput, ...request.Option) (*ec2.ReleaseAddressOutput, error) {
 	panic("Not implemented")
-	return nil, nil
+}
+func (m *MockEC2) ReleaseAddress(request *ec2.ReleaseAddressInput) (*ec2.ReleaseAddressOutput, error) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	klog.Infof("ReleaseAddress: %v", request)
+
+	id := aws.StringValue(request.AllocationId)
+	o := m.Addresses[id]
+	if o == nil {
+		return nil, fmt.Errorf("Address %q not found", id)
+	}
+	delete(m.Addresses, id)
+
+	return &ec2.ReleaseAddressOutput{}, nil
 }

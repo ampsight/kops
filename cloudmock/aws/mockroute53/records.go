@@ -18,24 +18,34 @@ package mockroute53
 
 import (
 	"fmt"
+
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/request"
 	"github.com/aws/aws-sdk-go/service/route53"
-	"github.com/golang/glog"
+	"k8s.io/klog"
 )
 
 func (m *MockRoute53) ListResourceRecordSetsRequest(*route53.ListResourceRecordSetsInput) (*request.Request, *route53.ListResourceRecordSetsOutput) {
 	panic("MockRoute53 ListResourceRecordSetsRequest not implemented")
-	return nil, nil
+}
+
+func (m *MockRoute53) ListResourceRecordSetsWithContext(aws.Context, *route53.ListResourceRecordSetsInput, ...request.Option) (*route53.ListResourceRecordSetsOutput, error) {
+	panic("Not implemented")
 }
 
 func (m *MockRoute53) ListResourceRecordSets(*route53.ListResourceRecordSetsInput) (*route53.ListResourceRecordSetsOutput, error) {
 	panic("MockRoute53 ListResourceRecordSets not implemented")
-	return nil, nil
+}
+
+func (m *MockRoute53) ListResourceRecordSetsPagesWithContext(aws.Context, *route53.ListResourceRecordSetsInput, func(*route53.ListResourceRecordSetsOutput, bool) bool, ...request.Option) error {
+	panic("Not implemented")
 }
 
 func (m *MockRoute53) ListResourceRecordSetsPages(request *route53.ListResourceRecordSetsInput, callback func(*route53.ListResourceRecordSetsOutput, bool) bool) error {
-	glog.Infof("ListResourceRecordSetsPages %v", request)
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	klog.Infof("ListResourceRecordSetsPages %v", request)
 
 	if request.HostedZoneId == nil {
 		// TODO: Use correct error
@@ -43,7 +53,7 @@ func (m *MockRoute53) ListResourceRecordSetsPages(request *route53.ListResourceR
 	}
 
 	if request.StartRecordIdentifier != nil || request.StartRecordName != nil || request.StartRecordType != nil || request.MaxItems != nil {
-		glog.Fatalf("Unsupported options: %v", request)
+		klog.Fatalf("Unsupported options: %v", request)
 	}
 
 	zone := m.findZone(*request.HostedZoneId)
@@ -66,11 +76,17 @@ func (m *MockRoute53) ListResourceRecordSetsPages(request *route53.ListResourceR
 
 func (m *MockRoute53) ChangeResourceRecordSetsRequest(*route53.ChangeResourceRecordSetsInput) (*request.Request, *route53.ChangeResourceRecordSetsOutput) {
 	panic("MockRoute53 ChangeResourceRecordSetsRequest not implemented")
-	return nil, nil
+}
+
+func (m *MockRoute53) ChangeResourceRecordSetsWithContext(aws.Context, *route53.ChangeResourceRecordSetsInput, ...request.Option) (*route53.ChangeResourceRecordSetsOutput, error) {
+	panic("Not implemented")
 }
 
 func (m *MockRoute53) ChangeResourceRecordSets(request *route53.ChangeResourceRecordSetsInput) (*route53.ChangeResourceRecordSetsOutput, error) {
-	glog.Infof("ChangeResourceRecordSets %v", request)
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	klog.Infof("ChangeResourceRecordSets %v", request)
 
 	if request.HostedZoneId == nil {
 		// TODO: Use correct error
@@ -115,6 +131,14 @@ func (m *MockRoute53) ChangeResourceRecordSets(request *route53.ChangeResourceRe
 			} else {
 				// TODO: Use correct error
 				return nil, fmt.Errorf("duplicate record %s %q", changeType, changeName)
+			}
+
+		case "DELETE":
+			if foundIndex == -1 {
+				// TODO: Use correct error
+				return nil, fmt.Errorf("record not found %s %q", changeType, changeName)
+			} else {
+				zone.records = append(zone.records[:foundIndex], zone.records[foundIndex+1:]...)
 			}
 
 		default:

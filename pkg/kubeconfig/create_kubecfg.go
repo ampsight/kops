@@ -18,14 +18,16 @@ package kubeconfig
 
 import (
 	"fmt"
-	"github.com/golang/glog"
+	"sort"
+
+	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/klog"
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/dns"
 	"k8s.io/kops/upup/pkg/fi"
-	"sort"
 )
 
-func BuildKubecfg(cluster *kops.Cluster, keyStore fi.Keystore, secretStore fi.SecretStore, status kops.StatusStore) (*KubeconfigBuilder, error) {
+func BuildKubecfg(cluster *kops.Cluster, keyStore fi.Keystore, secretStore fi.SecretStore, status kops.StatusStore, configAccess clientcmd.ConfigAccess) (*KubeconfigBuilder, error) {
 	clusterName := cluster.ObjectMeta.Name
 
 	master := cluster.Spec.MasterPublicName
@@ -34,7 +36,26 @@ func BuildKubecfg(cluster *kops.Cluster, keyStore fi.Keystore, secretStore fi.Se
 	}
 
 	server := "https://" + master
+
+	// We use the LoadBalancer where we know the master DNS name is otherwise unreachable
+	useELBName := false
+
+	// If the master DNS is a gossip DNS name; there's no way that name can resolve outside the cluster
 	if dns.IsGossipHostname(master) {
+		useELBName = true
+	}
+
+	// If the DNS is set up as a private HostedZone, but here we have to be
+	// careful that we aren't accessing the API over DirectConnect (or a VPN).
+	// We differentiate using the heuristic that if we have an internal ELB
+	// we are likely connected directly to the VPC.
+	privateDNS := cluster.Spec.Topology != nil && cluster.Spec.Topology.DNS.Type == kops.DNSTypePrivate
+	internalELB := cluster.Spec.API != nil && cluster.Spec.API.LoadBalancer != nil && cluster.Spec.API.LoadBalancer.Type == kops.LoadBalancerTypeInternal
+	if privateDNS && !internalELB {
+		useELBName = true
+	}
+
+	if useELBName {
 		ingresses, err := status.GetApiIngressStatus(cluster)
 		if err != nil {
 			return nil, fmt.Errorf("error getting ingress status: %v", err)
@@ -52,21 +73,22 @@ func BuildKubecfg(cluster *kops.Cluster, keyStore fi.Keystore, secretStore fi.Se
 
 		sort.Strings(targets)
 		if len(targets) == 0 {
-			glog.Warningf("Did not find API endpoint for gossip hostname; may not be able to reach cluster")
+			klog.Warningf("Did not find API endpoint for gossip hostname; may not be able to reach cluster")
 		} else {
 			if len(targets) != 1 {
-				glog.Warningf("Found multiple API endpoints (%v), choosing arbitrarily", targets)
+				klog.Warningf("Found multiple API endpoints (%v), choosing arbitrarily", targets)
 			}
 			server = "https://" + targets[0]
 		}
 	}
 
-	b := NewKubeconfigBuilder()
+	b := NewKubeconfigBuilder(configAccess)
 
 	b.Context = clusterName
 
-	{
-		cert, _, err := keyStore.FindKeypair(fi.CertificateId_CA)
+	// add the CA Cert to the kubeconfig only if we didn't specify a SSL cert for the LB
+	if cluster.Spec.API == nil || cluster.Spec.API.LoadBalancer == nil || cluster.Spec.API.LoadBalancer.SSLCertificate == "" {
+		cert, _, _, err := keyStore.FindKeypair(fi.CertificateId_CA)
 		if err != nil {
 			return nil, fmt.Errorf("error fetching CA keypair: %v", err)
 		}
@@ -81,7 +103,7 @@ func BuildKubecfg(cluster *kops.Cluster, keyStore fi.Keystore, secretStore fi.Se
 	}
 
 	{
-		cert, key, err := keyStore.FindKeypair("kubecfg")
+		cert, key, _, err := keyStore.FindKeypair("kubecfg")
 		if err != nil {
 			return nil, fmt.Errorf("error fetching kubecfg keypair: %v", err)
 		}

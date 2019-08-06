@@ -24,10 +24,15 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	api "k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/assets"
+	"k8s.io/kops/pkg/client/simple/vfsclientset"
 	"k8s.io/kops/upup/pkg/fi"
+	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
+	"k8s.io/kops/util/pkg/vfs"
 )
 
 func buildMinimalCluster() *api.Cluster {
+	awsup.InstallMockAWSCloud(MockAWSRegion, "abcd")
+
 	c := &api.Cluster{}
 	c.ObjectMeta.Name = "testcluster.test.com"
 	c.Spec.KubernetesVersion = "1.4.6"
@@ -90,20 +95,32 @@ func TestPopulateCluster_Default_NoError(t *testing.T) {
 
 	addEtcdClusters(c)
 
-	assetBuilder := assets.NewAssetBuilder(nil)
-	_, err = PopulateClusterSpec(c, assetBuilder)
+	_, err = mockedPopulateClusterSpec(c)
 	if err != nil {
 		t.Fatalf("Unexpected error from PopulateCluster: %v", err)
 	}
 }
 
+func mockedPopulateClusterSpec(c *api.Cluster) (*api.Cluster, error) {
+	vfs.Context.ResetMemfsContext(true)
+
+	assetBuilder := assets.NewAssetBuilder(c, "")
+	basePath, err := vfs.Context.BuildVfsPath("memfs://tests")
+	if err != nil {
+		return nil, fmt.Errorf("error building vfspath: %v", err)
+	}
+	clientset := vfsclientset.NewVFSClientset(basePath, true)
+	return PopulateClusterSpec(clientset, c, assetBuilder)
+}
+
 func TestPopulateCluster_Docker_Spec(t *testing.T) {
 	c := buildMinimalCluster()
 	c.Spec.Docker = &api.DockerConfig{
-		MTU:              fi.Int32(5678),
-		InsecureRegistry: fi.String("myregistry.com:1234"),
-		RegistryMirrors:  []string{"https://registry.example.com"},
-		LogOpt:           []string{"env=FOO"},
+		MTU:                fi.Int32(5678),
+		InsecureRegistry:   fi.String("myregistry.com:1234"),
+		InsecureRegistries: []string{"myregistry.com:1234", "myregistry2.com:1234"},
+		RegistryMirrors:    []string{"https://registry.example.com"},
+		LogOpt:             []string{"env=FOO"},
 	}
 
 	err := PerformAssignments(c)
@@ -113,8 +130,7 @@ func TestPopulateCluster_Docker_Spec(t *testing.T) {
 
 	addEtcdClusters(c)
 
-	assetBuilder := assets.NewAssetBuilder(nil)
-	full, err := PopulateClusterSpec(c, assetBuilder)
+	full, err := mockedPopulateClusterSpec(c)
 	if err != nil {
 		t.Fatalf("Unexpected error from PopulateCluster: %v", err)
 	}
@@ -125,6 +141,10 @@ func TestPopulateCluster_Docker_Spec(t *testing.T) {
 
 	if fi.StringValue(full.Spec.Docker.InsecureRegistry) != "myregistry.com:1234" {
 		t.Fatalf("Unexpected Docker InsecureRegistry: %v", full.Spec.Docker.InsecureRegistry)
+	}
+
+	if strings.Join(full.Spec.Docker.InsecureRegistries, "!") != "myregistry.com:1234!myregistry2.com:1234" {
+		t.Fatalf("Unexpected Docker InsecureRegistries: %v", full.Spec.Docker.InsecureRegistries)
 	}
 
 	if strings.Join(full.Spec.Docker.RegistryMirrors, "!") != "https://registry.example.com" {
@@ -144,8 +164,8 @@ func TestPopulateCluster_StorageDefault(t *testing.T) {
 	}
 
 	addEtcdClusters(c)
-	assetBuilder := assets.NewAssetBuilder(c.Spec.Assets)
-	full, err := PopulateClusterSpec(c, assetBuilder)
+
+	full, err := mockedPopulateClusterSpec(c)
 	if err != nil {
 		t.Fatalf("Unexpected error from PopulateCluster: %v", err)
 	}
@@ -162,8 +182,8 @@ func build(c *api.Cluster) (*api.Cluster, error) {
 	}
 
 	addEtcdClusters(c)
-	assetBuilder := assets.NewAssetBuilder(nil)
-	full, err := PopulateClusterSpec(c, assetBuilder)
+
+	full, err := mockedPopulateClusterSpec(c)
 	if err != nil {
 		return nil, fmt.Errorf("Unexpected error from PopulateCluster: %v", err)
 	}
@@ -239,8 +259,7 @@ func TestPopulateCluster_Custom_CIDR(t *testing.T) {
 
 	addEtcdClusters(c)
 
-	assetBuilder := assets.NewAssetBuilder(nil)
-	full, err := PopulateClusterSpec(c, assetBuilder)
+	full, err := mockedPopulateClusterSpec(c)
 	if err != nil {
 		t.Fatalf("Unexpected error from PopulateCluster: %v", err)
 	}
@@ -260,8 +279,7 @@ func TestPopulateCluster_IsolateMasters(t *testing.T) {
 
 	addEtcdClusters(c)
 
-	assetBuilder := assets.NewAssetBuilder(nil)
-	full, err := PopulateClusterSpec(c, assetBuilder)
+	full, err := mockedPopulateClusterSpec(c)
 	if err != nil {
 		t.Fatalf("Unexpected error from PopulateCluster: %v", err)
 	}
@@ -284,8 +302,7 @@ func TestPopulateCluster_IsolateMastersFalse(t *testing.T) {
 
 	addEtcdClusters(c)
 
-	assetBuilder := assets.NewAssetBuilder(nil)
-	full, err := PopulateClusterSpec(c, assetBuilder)
+	full, err := mockedPopulateClusterSpec(c)
 	if err != nil {
 		t.Fatalf("Unexpected error from PopulateCluster: %v", err)
 	}
@@ -376,8 +393,7 @@ func TestPopulateCluster_BastionIdleTimeoutInvalidNegative_Required(t *testing.T
 }
 
 func expectErrorFromPopulateCluster(t *testing.T, c *api.Cluster, message string) {
-	assetBuilder := assets.NewAssetBuilder(nil)
-	_, err := PopulateClusterSpec(c, assetBuilder)
+	_, err := mockedPopulateClusterSpec(c)
 	if err == nil {
 		t.Fatalf("Expected error from PopulateCluster")
 	}
@@ -411,8 +427,7 @@ func TestPopulateCluster_AnonymousAuth(t *testing.T) {
 
 	addEtcdClusters(c)
 
-	assetBuilder := assets.NewAssetBuilder(nil)
-	full, err := PopulateClusterSpec(c, assetBuilder)
+	full, err := mockedPopulateClusterSpec(c)
 	if err != nil {
 		t.Fatalf("Unexpected error from PopulateCluster: %v", err)
 	}
@@ -437,8 +452,7 @@ func TestPopulateCluster_AnonymousAuth_14(t *testing.T) {
 
 	addEtcdClusters(c)
 
-	assetBuilder := assets.NewAssetBuilder(nil)
-	full, err := PopulateClusterSpec(c, assetBuilder)
+	full, err := mockedPopulateClusterSpec(c)
 	if err != nil {
 		t.Fatalf("Unexpected error from PopulateCluster: %v", err)
 	}
@@ -489,8 +503,7 @@ func TestPopulateCluster_KubeController_High_Enough_Version(t *testing.T) {
 
 	addEtcdClusters(c)
 
-	assetBuilder := assets.NewAssetBuilder(nil)
-	full, err := PopulateClusterSpec(c, assetBuilder)
+	full, err := mockedPopulateClusterSpec(c)
 	if err != nil {
 		t.Fatalf("Unexpected error from PopulateCluster: %v", err)
 	}
@@ -512,8 +525,7 @@ func TestPopulateCluster_KubeController_Fail(t *testing.T) {
 
 	addEtcdClusters(c)
 
-	assetBuilder := assets.NewAssetBuilder(nil)
-	full, err := PopulateClusterSpec(c, assetBuilder)
+	full, err := mockedPopulateClusterSpec(c)
 	if err != nil {
 		t.Fatalf("Unexpected error from PopulateCluster: %v", err)
 	}

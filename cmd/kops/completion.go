@@ -24,8 +24,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"k8s.io/kops/cmd/kops/util"
-	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
-	"k8s.io/kubernetes/pkg/util/i18n"
+	"k8s.io/kubernetes/pkg/kubectl/util/i18n"
+	"k8s.io/kubernetes/pkg/kubectl/util/templates"
 )
 
 const boilerPlate = `
@@ -45,7 +45,7 @@ const boilerPlate = `
 `
 
 var (
-	completion_shells = map[string]func(out io.Writer, cmd *cobra.Command) error{
+	completionShells = map[string]func(out io.Writer, cmd *cobra.Command) error{
 		"bash": runCompletionBash,
 		"zsh":  runCompletionZsh,
 	}
@@ -125,7 +125,7 @@ func RunCompletion(f *util.Factory, cmd *cobra.Command, args []string, out io.Wr
 		return fmt.Errorf("shell is required")
 	}
 
-	run, found := completion_shells[c.Shell]
+	run, found := completionShells[c.Shell]
 	if !found {
 		return fmt.Errorf("Unsupported shell type %q.", args[0])
 	}
@@ -142,6 +142,10 @@ func runCompletionBash(out io.Writer, cmd *cobra.Command) error {
 }
 
 func runCompletionZsh(out io.Writer, cmd *cobra.Command) error {
+	zsh_head := "#compdef kops\n"
+
+	out.Write([]byte(zsh_head))
+
 	zsh_initialization := `
 __kops_bash_source() {
 	alias shopt=':'
@@ -284,6 +288,7 @@ __kops_convert_bash_to_zsh() {
 BASH_COMPLETION_EOF
 }
 __kops_bash_source <(__kops_convert_bash_to_zsh)
+_complete kops 2>/dev/null
 `
 	out.Write([]byte(zsh_tail))
 	return nil

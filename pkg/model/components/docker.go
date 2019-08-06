@@ -19,6 +19,7 @@ package components
 import (
 	"fmt"
 
+	"k8s.io/klog"
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/loader"
@@ -26,7 +27,7 @@ import (
 
 // DockerOptionsBuilder adds options for docker to the model
 type DockerOptionsBuilder struct {
-	Context *OptionsContext
+	*OptionsContext
 }
 
 var _ loader.OptionsBuilder = &DockerOptionsBuilder{}
@@ -44,13 +45,21 @@ func (b *DockerOptionsBuilder) BuildOptions(o interface{}) error {
 		clusterSpec.Docker = &kops.DockerConfig{}
 	}
 
+	docker := clusterSpec.Docker
+
 	if fi.StringValue(clusterSpec.Docker.Version) == "" {
 		if clusterSpec.KubernetesVersion == "" {
 			return fmt.Errorf("KubernetesVersion is required")
 		}
 
 		dockerVersion := ""
-		if sv.Major == 1 && sv.Minor >= 6 {
+		if sv.Major == 1 && sv.Minor >= 12 {
+			dockerVersion = "18.06.3"
+		} else if sv.Major == 1 && sv.Minor >= 9 {
+			dockerVersion = "17.03.2"
+		} else if sv.Major == 1 && sv.Minor >= 8 {
+			dockerVersion = "1.13.1"
+		} else if sv.Major == 1 && sv.Minor >= 6 {
 			dockerVersion = "1.12.6"
 		} else if sv.Major == 1 && sv.Minor >= 5 {
 			dockerVersion = "1.12.3"
@@ -66,12 +75,36 @@ func (b *DockerOptionsBuilder) BuildOptions(o interface{}) error {
 	}
 
 	if sv.Major == 1 && sv.Minor >= 6 {
-		if len(clusterSpec.Docker.LogOpt) == 0 && clusterSpec.Docker.LogDriver == "" {
+		if len(clusterSpec.Docker.LogOpt) == 0 && clusterSpec.Docker.LogDriver == nil {
 			// Use built-in docker logging, if not configured otherwise (by the user)
-			clusterSpec.Docker.LogDriver = "json-file"
+			logDriver := "json-file"
+			clusterSpec.Docker.LogDriver = &logDriver
 			clusterSpec.Docker.LogOpt = append(clusterSpec.Docker.LogOpt, "max-size=10m")
 			clusterSpec.Docker.LogOpt = append(clusterSpec.Docker.LogOpt, "max-file=5")
 		}
+	}
+
+	docker.LogLevel = fi.String("warn")
+	docker.IPTables = fi.Bool(false)
+	docker.IPMasq = fi.Bool(false)
+
+	// Note the alternative syntax... with a comma nodeup will try each of the filesystems in turn
+	if b.IsKubernetesGTE("1.11") {
+		// TODO(justinsb): figure out whether to use overlay2 on AWS jessie:
+		// The ContainerOS image now has docker configured to use overlay2 out-of-the-box
+		// and it is an error to specify the flag twice.
+		// But Jessie (still our default AWS image) isn't recommended by docker with overlay2
+		// (though that may be a kernel issue, and we run a custom kernel on our default image)
+		// But we still need to worry about users running generic AMIs (e.g. stock jessie)
+		docker.Storage = fi.String("overlay2,overlay,aufs")
+	} else {
+		docker.Storage = fi.String("overlay,aufs")
+	}
+
+	networking := clusterSpec.Networking
+	if networking == nil || networking.Classic != nil {
+		klog.Warningf("using deprecated (classic) networking")
+		docker.Bridge = fi.String("cbr0")
 	}
 
 	return nil

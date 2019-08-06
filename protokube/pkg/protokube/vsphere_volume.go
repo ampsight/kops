@@ -16,22 +16,27 @@ limitations under the License.
 
 package protokube
 
-// vspehre_volume houses vSphere volume and implements relevant interfaces.
+// vsphere_volume houses vSphere volume and implements relevant interfaces.
 
 import (
 	"errors"
 	"fmt"
-	"github.com/golang/glog"
 	"io/ioutil"
-	"k8s.io/kops/upup/pkg/fi/cloudup/vsphere"
 	"net"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
+
+	"k8s.io/klog"
+	etcdmanager "k8s.io/kops/protokube/pkg/etcd"
+	"k8s.io/kops/upup/pkg/fi/cloudup/vsphere"
 )
 
-const VolumeMetaDataFile = "/vol-metadata/metadata.json"
-const VolStatusValue = "attached"
+const (
+	VolumeMetaDataFile = "/vol-metadata/metadata.json"
+	VolStatusValue     = "attached"
+)
 
 // VSphereVolumes represents vSphere volume and implements Volumes interface.
 type VSphereVolumes struct{}
@@ -78,7 +83,7 @@ func (v *VSphereVolumes) FindVolumes() ([]*Volume, error) {
 			},
 		}
 
-		etcdSpec := &EtcdClusterSpec{
+		etcdSpec := &etcdmanager.EtcdClusterSpec{
 			ClusterKey: etcd.EtcdClusterName,
 			NodeName:   etcd.EtcdNodeName,
 		}
@@ -88,11 +93,25 @@ func (v *VSphereVolumes) FindVolumes() ([]*Volume, error) {
 			nodeNames = append(nodeNames, member.Name)
 		}
 		etcdSpec.NodeNames = nodeNames
-		vol.Info.EtcdClusters = []*EtcdClusterSpec{etcdSpec}
+		vol.Info.EtcdClusters = []*etcdmanager.EtcdClusterSpec{etcdSpec}
 		volumes = append(volumes, vol)
 	}
-	glog.V(4).Infof("Found volumes: %v", volumes)
+	klog.V(4).Infof("Found volumes: %v", volumes)
 	return volumes, nil
+}
+
+// FindMountedVolume implements Volumes::FindMountedVolume
+func (v *VSphereVolumes) FindMountedVolume(volume *Volume) (string, error) {
+	device := volume.LocalDevice
+
+	_, err := os.Stat(pathFor(device))
+	if err == nil {
+		return device, nil
+	}
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	return "", fmt.Errorf("error checking for device %q: %v", device, err)
 }
 
 func getDevice(mountPoint string) (string, error) {
@@ -111,7 +130,7 @@ func getDevice(mountPoint string) (string, error) {
 		for _, line := range lines {
 			if strings.Contains(line, mountPoint) {
 				lsblkOutput := strings.Split(line, " ")
-				glog.V(4).Infof("Found device: %v ", lsblkOutput[0])
+				klog.V(4).Infof("Found device: %v ", lsblkOutput[0])
 				return "/dev/" + lsblkOutput[0], nil
 			}
 		}
@@ -134,7 +153,7 @@ func getVolMetadata() ([]vsphere.VolumeMetadata, error) {
 // AttachVolume attaches given volume. In case of vSphere, volumes are statically mounted, so no operation is performed.
 func (v *VSphereVolumes) AttachVolume(volume *Volume) error {
 	// Currently this is a no-op for vSphere. The virtual disks should already be mounted on this VM.
-	glog.Infof("All volumes should already be attached. No operation done.")
+	klog.Infof("All volumes should already be attached. No operation done.")
 	return nil
 }
 

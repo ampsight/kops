@@ -14,5 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// +groupName=kops
+// +k8s:deepcopy-gen=package,register
+
+// +groupName=kops.k8s.io
 package kops // import "k8s.io/kops/pkg/apis/kops"

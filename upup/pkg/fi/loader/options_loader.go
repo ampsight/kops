@@ -20,13 +20,15 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/golang/glog"
-	"k8s.io/kops/upup/pkg/fi/utils"
 	"os"
 	"reflect"
 	"sort"
 	"strings"
 	"text/template"
+
+	"k8s.io/klog"
+	"k8s.io/kops/upup/pkg/fi/utils"
+	"k8s.io/kops/util/pkg/reflectutils"
 )
 
 const maxIterations = 10
@@ -95,10 +97,10 @@ func (l *OptionsLoader) iterate(userConfig interface{}, current interface{}) (in
 	next := reflect.New(t).Interface()
 
 	// Copy the current state before applying rules; they act as defaults
-	utils.JsonMergeStruct(next, current)
+	reflectutils.JsonMergeStruct(next, current)
 
 	for _, t := range l.templates {
-		glog.V(2).Infof("executing template %s (tags=%s)", t.Name, t.Tags)
+		klog.V(2).Infof("executing template %s (tags=%s)", t.Name, t.Tags)
 
 		var buffer bytes.Buffer
 		err := t.Template.ExecuteTemplate(&buffer, t.Name, current)
@@ -108,10 +110,10 @@ func (l *OptionsLoader) iterate(userConfig interface{}, current interface{}) (in
 
 		yamlBytes := buffer.Bytes()
 
-		jsonBytes, err := utils.YamlToJson(yamlBytes)
+		jsonBytes, err := utils.YAMLToJSON(yamlBytes)
 		if err != nil {
 			// TODO: It would be nice if yaml returned us the line number here
-			glog.Infof("error parsing yaml.  yaml follows:")
+			klog.Infof("error parsing yaml.  yaml follows:")
 			for i, line := range strings.Split(string(yamlBytes), "\n") {
 				fmt.Fprintf(os.Stderr, "%3d: %s\n", i, line)
 			}
@@ -125,7 +127,7 @@ func (l *OptionsLoader) iterate(userConfig interface{}, current interface{}) (in
 	}
 
 	for _, t := range l.Builders {
-		glog.V(2).Infof("executing builder %T", t)
+		klog.V(2).Infof("executing builder %T", t)
 
 		err := t.BuildOptions(next)
 		if err != nil {
@@ -134,7 +136,7 @@ func (l *OptionsLoader) iterate(userConfig interface{}, current interface{}) (in
 	}
 
 	// Also copy the user-provided values after applying rules; they act as overrides now
-	utils.JsonMergeStruct(next, userConfig)
+	reflectutils.JsonMergeStruct(next, userConfig)
 
 	return next, nil
 }
